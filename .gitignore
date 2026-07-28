@@ -1,0 +1,8 @@
+# Ignora tutti gli eseguibili compilati
+bin/
+
+# Ignora file oggetto temporanei
+*.o
+
+# Ignora file di sistema macOS
+.DS_Store

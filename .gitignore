@@ -1,0 +1,16 @@
+# Cartelle di output compilazione
+bin/*
+obj/*
+
+# Ignora eseguibili se compilati nella root
+*.out
+
+# File temporanei di backup e dell'editor
+*~
+*.swp
+.DS_Store
+.vscode/
+
+# File di output simulazione (es. log o csv generati a runtime)
+*.csv
+*.log

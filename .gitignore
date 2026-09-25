@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Cartelle di output compilazione
 bin/*
 obj/*
@@ -14,3 +15,13 @@ obj/*
 # File di output simulazione (es. log o csv generati a runtime)
 *.csv
 *.log
+=======
+# Ignora tutti gli eseguibili compilati
+bin/
+
+# Ignora file oggetto temporanei
+*.o
+
+# Ignora file di sistema macOS
+.DS_Store
+>>>>>>> 79838a39189dc0618e810253d47951089e1a33f9

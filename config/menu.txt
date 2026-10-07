@@ -1,0 +1,3 @@
+PRIMI: Spaghetti al Pomodoro; Risotto ai Funghi
+SECONDI: Pollo al Forno con Patate; Merluzzo con Insalata
+COFFEE: Normale; Macchiato; Decaffeinato; Ginseng

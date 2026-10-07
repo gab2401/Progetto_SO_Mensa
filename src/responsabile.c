@@ -76,8 +76,10 @@ int parse_config(const char *filepath, Config *conf){
                 conf->avg_srvc[STAT_CASSA] = atoi(val);
             }
             
-            }
         }
+    }
+    fclose(fp);
+    return 0;
 }
 
 int main(int argc, char *argv[]){

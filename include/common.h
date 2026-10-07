@@ -1,9 +1,10 @@
- #ifndef COMMON_H
+#ifndef COMMON_H
 #define COMMON_H
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -23,6 +24,18 @@
 #define FTOK_PROJ_SEM 20
 #define FTOK_PROJ_MSG_BASE 30 // offset per code stazioni
 
+// Union richiesta esplicitamente su Linux per semctl()
+#if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
+/* union semun e' gia' definita */
+#else
+union semun {
+    int val;                    // Valore per SETVAL
+    struct semid_ds *buf;       // Buffer per IPC_STAT, IPC_SET
+    unsigned short *array;      // Array per GETALL, SETALL
+    struct seminfo *__buf;      // Buffer per IPC_INFO
+};
+#endif
+
 // Tipi di stazione
 typedef enum {
     STAT_PRIMI = 0,
@@ -34,39 +47,40 @@ typedef enum {
 
 // Indici per il set di semafori (semget)
 enum {
-    SEM_MUTEX_SHM = 0,    // Protezione per lettura/scrittura su memoria condivisa
-    SEM_POSTAZIONI_PRIMI, // Semaforo contatore per i posti operatore ai primi
-    SEM_POSTAZIONI_SECONDI,// Semaforo contatore per i posti operatore ai secondi
-    SEM_POSTAZIONI_COFFEE, // Semaforo contatore per i posti operatore al caffè
-    SEM_POSTAZIONI_CASSA,  // Semaforo contatore per i posti cassiere
-    SEM_TAVOLI,           // Semaforo contatore posti a sedere (NOF_TABLE_SEATS)
+    SEM_MUTEX_SHM = 0,     // Protezione lettura/scrittura memoria condivisa
+    SEM_POSTAZIONI_PRIMI,  // Postazioni disponibili primi
+    SEM_POSTAZIONI_SECONDI,// Postazioni disponibili secondi
+    SEM_POSTAZIONI_COFFEE, // Postazioni disponibili caffe'
+    SEM_POSTAZIONI_CASSA,  // Postazioni disponibili cassa
+    SEM_TAVOLI,            // Posti a tavola disponibili (NOF_TABLE_SEATS)
     NUM_SEMAPHORES
 };
 
 // Configurazione letta da file
 typedef struct {
-    int sim_duration;           // Giorni totali simulazione
-    long n_nano_secs;           // Nanosecondi per simulare 1 minuto
-    int nof_workers;            // Numero processi operatore
-    int nof_users;              // Numero processi utente
-    int nof_table_seats;        // Posti a tavola disponibili
-    int nof_wk_seats[NUM_STATIONS]; // Postazioni per stazione
-    int avg_refill_primi;       // Ricarica porzioni primi
-    int avg_refill_secondi;     // Ricarica porzioni secondi
-    int max_porzioni_primi;     // Massimo stoccabile primi
-    int max_porzioni_secondi;   // Massimo stoccabile secondi
-    int nof_pause;              // Numero max pause operatore
-    int overload_threshold;     // Soglia terminazione utenti in attesa
+    int sim_duration;
+    long n_nano_secs;
+    int nof_workers;
+    int nof_users;
+    int nof_table_seats;
+    int nof_wk_seats[NUM_STATIONS];
+    int avg_refill_primi;
+    int avg_refill_secondi;
+    int max_porzioni_primi;
+    int max_porzioni_secondi;
+    int nof_pause;
+    int overload_threshold;
     double price_primi;
     double price_secondi;
     double price_coffee;
-    int avg_srvc[NUM_STATIONS]; // Tempi medi di servizio
+    int avg_srvc[NUM_STATIONS];
 } Config;
 
 // Struttura in Shared Memory per lo stato globale e le statistiche
 typedef struct {
-    int simulazione_attiva;     // Flag booleano (1 attiva, 0 stop)
-    int giorno_corrente;        // Giorno di simulazione in corso
+    int simulazione_attiva;     // 1 attiva, 0 stop
+    int giorno_corrente;        // Giorno in corso
+    int minuto_corrente;        // Minuto virtuale del giorno corrente (per refill ogni 10 min)
     
     // Piatti disponibili (2 tipologie per primi e secondi)
     int porzioni_primi[2];
@@ -90,14 +104,14 @@ typedef struct {
     
     // Controllo terminazione
     int utenti_in_coda_a_fine_giorno;
-    int motivo_terminazione; // 0: timeout, 1: overload
+    int motivo_terminazione;    // 0: timeout, 1: overload
 } SharedData;
 
 // Messaggio per code IPC (scambio tra Utente e Operatore/Cassiere)
 typedef struct {
     long mtype;          // Canale: PID del destinatario oppure 1 (richiesta generica)
     pid_t sender_pid;    // Chi invia il messaggio
-    int dish_choice;     // 0 o 1 (per primi/secondi), o tipo caffè
+    int dish_choice;     // 0 o 1 (per primi/secondi), o tipo caffe'
     double importo;      // Usato per la cassa
     int status;          // 0: successo, -1: piatto esaurito
 } OrderMessage;

@@ -5,14 +5,14 @@ BIN_DIR = bin
 OBJ_DIR = obj
 
 # Eseguibili previsti
-TARGETS = $(BIN_DIR)/responsabile_mensa $(BIN_DIR)/operatore $(BIN_DIR)/cassiere $(BIN_DIR)/utente
+TARGETS = $(BIN_DIR)/responsabile
 
 all: directories $(TARGETS)
 
 directories:
 	@mkdir -p $(BIN_DIR) $(OBJ_DIR)
 
-$(BIN_DIR)/responsabile_mensa: $(OBJ_DIR)/responsabile_mensa.o
+$(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(BIN_DIR)/operatore: $(OBJ_DIR)/operatore.o

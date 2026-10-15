@@ -12,7 +12,7 @@ all: directories $(TARGETS)
 directories:
 	@mkdir -p $(BIN_DIR) $(OBJ_DIR)
 
-$(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o
+$(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o $(OBJ_DIR)/config.o
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(BIN_DIR)/operatore: $(OBJ_DIR)/operatore.o

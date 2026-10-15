@@ -1,85 +1,29 @@
 #include <stdio.h>
 #include "common.h"
+#include "config.h"
 
-int parse_config(const char *filepath, Config *conf){
+// Variabili globali per permettere la pulizia nel Signal Handler
+static int shm_id = -1;
+static SharedData *shm_ptr = NULL;
 
-    FILE *fp = fopen(filepath, "r");
-    if(fp == NULL){
-        perror("Errore file di configurazione nullo"); //Stampa errore
-        return -1;
+// Funzione centralizzata di rimozione risorse IPC
+void cleanup_resources(void) {
+    if (shm_ptr != NULL && shm_ptr != (void *)-1) {
+        shmdt(shm_ptr);
+        shm_ptr = NULL;
     }
-
-    char line[256];
-    char key[128];
-    char val[128];
-
-    while( fgets(line, sizeof(line), fp) != NULL){
-        //Ignoriamo righe vuote
-        if( line[0] == '\n' || line[0] == '#'){ continue; }
-
-        //Estrae key e val separati da '='
-        if(sscanf(line, "%127[^=]=%127s", key, val) == 2){
-
-            //Confronta la chiave e popola la struct conf
-            //interi semplici
-            if (strcmp(key, "SIM_DURATION") == 0) {
-                conf->sim_duration = atoi(val);
-            } else if (strcmp(key, "NOF_WORKERS") == 0) {
-                conf->nof_workers = atoi(val);
-            } else if (strcmp(key, "NOF_USERS") == 0) {
-                conf->nof_users = atoi(val);
-            } else if (strcmp(key, "NOF_TABLE_SEATS") == 0) {
-                conf->nof_table_seats = atoi(val);
-            } else if (strcmp(key, "AVG_REFILL_PRIMI") == 0) {
-                conf->avg_refill_primi = atoi(val);
-            } else if (strcmp(key, "AVG_REFILL_SECONDI") == 0) {
-                conf->avg_refill_secondi = atoi(val);
-            } else if (strcmp(key, "MAX_PORZIONI_PRIMI") == 0) {
-                conf->max_porzioni_primi = atoi(val);
-            } else if (strcmp(key, "MAX_PORZIONI_SECONDI") == 0) {
-                conf->max_porzioni_secondi = atoi(val);
-            } else if (strcmp(key, "NOF_PAUSE") == 0) {
-                conf->nof_pause = atoi(val);
-            } else if (strcmp(key, "OVERLOAD_THRESHOLD") == 0) {
-                conf->overload_threshold = atoi(val);
-
-            // Nanosecondi (long int con atol)
-            } else if (strcmp(key, "N_NANO_SECS") == 0) {
-                conf->n_nano_secs = atol(val);
-
-            // Prezzi (double con atof)
-            } else if (strcmp(key, "PRICE_PRIMI") == 0) {
-                conf->price_primi = atof(val);
-            } else if (strcmp(key, "PRICE_SECONDI") == 0) {
-                conf->price_secondi = atof(val);
-            } else if (strcmp(key, "PRICE_COFFEE") == 0) {
-                conf->price_coffee = atof(val);
-
-            // Postazioni per ciascuna stazione
-            } else if (strcmp(key, "NOF_WK_SEATS_PRIMI") == 0) {
-                conf->nof_wk_seats[STAT_PRIMI] = atoi(val);
-            } else if (strcmp(key, "NOF_WK_SEATS_SECONDI") == 0) {
-                conf->nof_wk_seats[STAT_SECONDI] = atoi(val);
-            } else if (strcmp(key, "NOF_WK_SEATS_COFFEE") == 0) {
-                conf->nof_wk_seats[STAT_COFFEE] = atoi(val);
-            } else if (strcmp(key, "NOF_WK_SEATS_CASSA") == 0) {
-                conf->nof_wk_seats[STAT_CASSA] = atoi(val);
-
-            // Tempi medi di servizio
-            } else if (strcmp(key, "AVG_SRVC_PRIMI") == 0) {
-                conf->avg_srvc[STAT_PRIMI] = atoi(val);
-            } else if (strcmp(key, "AVG_SRVC_SECONDI") == 0) {
-                conf->avg_srvc[STAT_SECONDI] = atoi(val);
-            } else if (strcmp(key, "AVG_SRVC_COFFEE") == 0) {
-                conf->avg_srvc[STAT_COFFEE] = atoi(val);
-            } else if (strcmp(key, "AVG_SRVC_CASSA") == 0) {
-                conf->avg_srvc[STAT_CASSA] = atoi(val);
-            }
-            
-        }
+    if (shm_id != -1) {
+        shmctl(shm_id, IPC_RMID, NULL);
+        shm_id = -1;
+        printf("\n[CLEANUP] Memoria condivisa rimossa con successo.\n");
     }
-    fclose(fp);
-    return 0;
+}
+
+// Handler per SIGINT (Ctrl+C) e SIGTERM
+void sig_handler(int signum) {
+    (void)signum; // Evita warning parametro non usato con -Wextra
+    cleanup_resources();
+    _exit(EXIT_SUCCESS); // _exit e' async-signal-safe
 }
 
 int main(int argc, char *argv[]){
@@ -98,6 +42,89 @@ int main(int argc, char *argv[]){
     printf("- Durata simulazione: %d giorni\n", conf.sim_duration);
     printf("- Lavoratori: %d, Utenti: %d\n", conf.nof_workers, conf.nof_users);
     printf("- Prezzo primi: %.2f EUR\n", conf.price_primi);
+
+    //Registrazione Handler
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = sig_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
+    sigaction(SIGTERM, &sa, NULL);
+
+    //MEMORIA CONDIVISA
+    //Dichiarazione variabili per ID e puntatore
+    int shm_id;
+    SharedData *shm_ptr = NULL;
+
+    //Generare chiave con ftok
+    key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
+    if(shm_key == -1){
+        perror("Errore generazione chiave ftok per Memoria condivisa");
+        exit(EXIT_FAILURE);
+    }
+
+    //Creare il segmento di emoria condivisa nel kernel
+    shm_id = shmget(shm_key, sizeof(SharedData), IPC_CREAT | IPC_EXCL | 0600);
+    if (shm_id == -1) {
+        perror("Errore creazione shmget");
+        exit(EXIT_FAILURE);
+    }
+
+    //Agganciare la memoria con shmat
+    shm_ptr = (SharedData *) shmat(shm_id, NULL, 0);
+    if(shm_ptr == (void *)-1){
+        perror("Errore aggancio shmat");
+        shmctl(shm_id,IPC_RMID, NULL);
+        exit(EXIT_FAILURE);
+    }
+
+    //Inizializzare a zero la struttura e impostare i valori iniziali
+    memset(shm_ptr, 0, sizeof(SharedData));
+    shm_ptr->simulazione_attiva = 1;
+    shm_ptr->giorno_corrente = 1;
+    shm_ptr->minuto_corrente = 0;
+    shm_ptr->porzioni_primi[0] = conf.avg_refill_primi;
+    shm_ptr->porzioni_primi[1] = conf.avg_refill_primi;
+    shm_ptr->porzioni_secondi[0] = conf.avg_refill_secondi;
+    shm_ptr->porzioni_secondi[1] = conf.avg_refill_secondi;
+
+    printf("Porzioni iniziali primo 1: %d\n", shm_ptr->porzioni_primi[0]);
+
+    //CREAZIONE SEMAFORI
+    key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
+    int sem_id = semget(sem_key, NUM_SEMAPHORES, IPC_CREAT | IPC_EXCL | 0600);
+
+    union semun arg;
+
+    // 1. Mutex per la Shared Memory (deve partire a 1 per consentire il primo accesso)
+    arg.val = 1;
+    semctl(sem_id, SEM_MUTEX_SHM, SETVAL, arg);
+
+    // 2. Postazioni operatori (partono con i valori letti dalla config)
+    arg.val = conf.nof_wk_seats[STAT_PRIMI];
+    semctl(sem_id, SEM_POSTAZIONI_PRIMI, SETVAL, arg);
+
+    arg.val = conf.nof_wk_seats[STAT_SECONDI];
+    semctl(sem_id, SEM_POSTAZIONI_SECONDI, SETVAL, arg);
+
+    arg.val = conf.nof_wk_seats[STAT_COFFEE];
+    semctl(sem_id, SEM_POSTAZIONI_COFFEE, SETVAL, arg);
+
+    arg.val = conf.nof_wk_seats[STAT_CASSA];
+    semctl(sem_id, SEM_POSTAZIONI_CASSA, SETVAL, arg);
+
+    // 3. Posti tavoli
+    arg.val = conf.nof_table_seats;
+    semctl(sem_id, SEM_TAVOLI, SETVAL, arg);
+
+    printf("Posti tavoli semaforo:");
+
+    //Deallocazione SHM
+    shmdt(shm_ptr);
+    shmctl(shm_id, IPC_RMID, NULL);
+
+    //Deallocazione Semafori
+    semctl(sem_id, 0, IPC_RMID);
 
     return 0;
 }

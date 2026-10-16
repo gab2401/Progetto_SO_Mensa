@@ -53,6 +53,7 @@ enum {
     SEM_POSTAZIONI_COFFEE, // Postazioni disponibili caffe'
     SEM_POSTAZIONI_CASSA,  // Postazioni disponibili cassa
     SEM_TAVOLI,            // Posti a tavola disponibili (NOF_TABLE_SEATS)
+    SEM_BARRIERA_START,    // Barriera per avvio sincrono di tutti i processi
     NUM_SEMAPHORES
 };
 

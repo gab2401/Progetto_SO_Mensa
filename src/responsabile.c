@@ -1,13 +1,43 @@
-#include <stdio.h>
 #include "common.h"
 #include "config.h"
+#include "ipc_utils.h"
 
-// Variabili globali per permettere la pulizia nel Signal Handler
+// Variabili globali per la gestione della pulizia e dei segnali
 static int shm_id = -1;
 static SharedData *shm_ptr = NULL;
+static int sem_id = -1;
+static int msg_queue_id[NUM_STATIONS] = {-1, -1, -1, -1};
 
-// Funzione centralizzata di rimozione risorse IPC
+// Tracciamento dei processi figli per la terminazione controllata
+static pid_t *child_pids = NULL;
+static int num_children_spawned = 0;
+
+// Funzione helper per simulare i minuti virtuali senza busy waiting
+void attendi_nanosecondi(long nanosecs) {
+    if (nanosecs <= 0) return;
+    struct timespec req, rem;
+    req.tv_sec = nanosecs / 1000000000L;
+    req.tv_nsec = nanosecs % 1000000000L;
+    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+        req = rem; // Completa l'attesa se interrotta da un segnale non fatale
+    }
+}
+
+// Deallocazione completa di processi e risorse IPC
 void cleanup_resources(void) {
+    // 1. Invio SIGTERM a tutti i processi figli e attesa terminazione
+    for (int i = 0; i < num_children_spawned; i++) {
+        if (child_pids != NULL && child_pids[i] > 0) {
+            kill(child_pids[i], SIGTERM);
+            waitpid(child_pids[i], NULL, 0);
+        }
+    }
+    if (child_pids != NULL) {
+        free(child_pids);
+        child_pids = NULL;
+    }
+
+    // 2. Sgancio e rimozione Memoria Condivisa
     if (shm_ptr != NULL && shm_ptr != (void *)-1) {
         shmdt(shm_ptr);
         shm_ptr = NULL;
@@ -15,18 +45,48 @@ void cleanup_resources(void) {
     if (shm_id != -1) {
         shmctl(shm_id, IPC_RMID, NULL);
         shm_id = -1;
-        printf("\n[CLEANUP] Memoria condivisa rimossa con successo.\n");
     }
+
+    // 3. Rimozione Set di Semafori
+    if (sem_id != -1) {
+        semctl(sem_id, 0, IPC_RMID);
+        sem_id = -1;
+    }
+
+    // 4. Rimozione Code di Messaggi
+    for (int i = 0; i < NUM_STATIONS; i++) {
+        if (msg_queue_id[i] != -1) {
+            msgctl(msg_queue_id[i], IPC_RMID, NULL);
+            msg_queue_id[i] = -1;
+        }
+    }
+    printf("\n[CLEANUP] Tutti i processi e le risorse IPC sono stati rimossi.\n");
 }
 
 // Handler per SIGINT (Ctrl+C) e SIGTERM
 void sig_handler(int signum) {
-    (void)signum; // Evita warning parametro non usato con -Wextra
+    (void)signum;
     cleanup_resources();
-    _exit(EXIT_SUCCESS); // _exit e' async-signal-safe
+    _exit(EXIT_SUCCESS);
 }
 
-int main(int argc, char *argv[]){
+// Helper per fork ed execve
+pid_t avvia_processo(const char *bin_path, char *const args[]) {
+    pid_t pid = fork();
+    if (pid == -1) {
+        perror("Errore fork");
+        return -1;
+    }
+    if (pid == 0) {
+        execve(bin_path, args, NULL);
+        // Se execve fallisce, termina immediatamente il processo duplicato
+        perror("Errore execve");
+        _exit(EXIT_FAILURE);
+    }
+    return pid;
+}
+
+int main(int argc, char *argv[]) {
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <file_configurazione>\n", argv[0]);
         exit(EXIT_FAILURE);
@@ -37,13 +97,13 @@ int main(int argc, char *argv[]){
         exit(EXIT_FAILURE);
     }
 
-    // Stampa di verifica a video
     printf("Configurazione caricata con successo:\n");
     printf("- Durata simulazione: %d giorni\n", conf.sim_duration);
     printf("- Lavoratori: %d, Utenti: %d\n", conf.nof_workers, conf.nof_users);
-    printf("- Prezzo primi: %.2f EUR\n", conf.price_primi);
+    printf("- Prezzo primi: %.2f EUR, secondi: %.2f EUR, caffe': %.2f EUR\n",
+           conf.price_primi, conf.price_secondi, conf.price_coffee);
 
-    //Registrazione Handler
+    // Registrazione gestore segnali
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = sig_handler;
@@ -51,80 +111,128 @@ int main(int argc, char *argv[]){
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    //MEMORIA CONDIVISA
-    //Dichiarazione variabili per ID e puntatore
-    int shm_id;
-    SharedData *shm_ptr = NULL;
+    // Setup risorse IPC
+    shm_id = init_shared_memory(&conf, &shm_ptr);
+    if (shm_id == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
 
-    //Generare chiave con ftok
-    key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
-    if(shm_key == -1){
-        perror("Errore generazione chiave ftok per Memoria condivisa");
+    sem_id = init_semaphores(&conf);
+    if (sem_id == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+
+    if (init_message_queues(msg_queue_id) == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+
+    // Allocazione array dei PID
+    int totale_figli = conf.nof_workers + conf.nof_users;
+    child_pids = malloc(sizeof(pid_t) * totale_figli);
+    if (child_pids == NULL) {
+        perror("Errore malloc child_pids");
+        cleanup_resources();
         exit(EXIT_FAILURE);
     }
 
-    //Creare il segmento di emoria condivisa nel kernel
-    shm_id = shmget(shm_key, sizeof(SharedData), IPC_CREAT | IPC_EXCL | 0600);
-    if (shm_id == -1) {
-        perror("Errore creazione shmget");
-        exit(EXIT_FAILURE);
+    // -------------------------------------------------------------
+    // AVVIO PROCESSI FIGLI (FORK + EXECVE)
+    // -------------------------------------------------------------
+
+    // 1. Avvio Cassiere
+    char *cassiere_args[] = {"cassiere", NULL};
+    pid_t pid_cassa = avvia_processo("./bin/cassiere", cassiere_args);
+    if (pid_cassa == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+    child_pids[num_children_spawned++] = pid_cassa;
+
+    // 2. Avvio Operatori (garantendo almeno 1 operatore per stazione primi, secondi, caffe')
+    int operatori_da_creare = conf.nof_workers - 1;
+    for (int i = 0; i < operatori_da_creare; i++) {
+        int staz_id;
+        if (i == 0) staz_id = STAT_PRIMI;
+        else if (i == 1) staz_id = STAT_SECONDI;
+        else if (i == 2) staz_id = STAT_COFFEE;
+        else staz_id = (i % 3); // Distribuzione dei rimanenti tra le stazioni
+
+        char staz_arg[16];
+        snprintf(staz_arg, sizeof(staz_arg), "%d", staz_id);
+        char *operatore_args[] = {"operatore", staz_arg, NULL};
+
+        pid_t pid_op = avvia_processo("./bin/operatore", operatore_args);
+        if (pid_op == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+        child_pids[num_children_spawned++] = pid_op;
     }
 
-    //Agganciare la memoria con shmat
-    shm_ptr = (SharedData *) shmat(shm_id, NULL, 0);
-    if(shm_ptr == (void *)-1){
-        perror("Errore aggancio shmat");
-        shmctl(shm_id,IPC_RMID, NULL);
-        exit(EXIT_FAILURE);
+    // 3. Avvio Utenti
+    char *utente_args[] = {"utente", NULL};
+    for (int i = 0; i < conf.nof_users; i++) {
+        pid_t pid_ut = avvia_processo("./bin/utente", utente_args);
+        if (pid_ut == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+        child_pids[num_children_spawned++] = pid_ut;
     }
 
-    //Inizializzare a zero la struttura e impostare i valori iniziali
-    memset(shm_ptr, 0, sizeof(SharedData));
-    shm_ptr->simulazione_attiva = 1;
-    shm_ptr->giorno_corrente = 1;
-    shm_ptr->minuto_corrente = 0;
-    shm_ptr->porzioni_primi[0] = conf.avg_refill_primi;
-    shm_ptr->porzioni_primi[1] = conf.avg_refill_primi;
-    shm_ptr->porzioni_secondi[0] = conf.avg_refill_secondi;
-    shm_ptr->porzioni_secondi[1] = conf.avg_refill_secondi;
+    printf("[RESPONSABILE] Creati %d processi figli. Attesa sincronizzazione alla barriera...\n",
+           num_children_spawned);
 
-    printf("Porzioni iniziali primo 1: %d\n", shm_ptr->porzioni_primi[0]);
+    // Attesa sincrona che tutti i figli abbiano completato il setup
+    sem_wait_zero(sem_id, SEM_BARRIERA_START);
+    printf("[RESPONSABILE] Tutti i processi pronti. AVVIO SIMULAZIONE!\n");
 
-    //CREAZIONE SEMAFORI
-    key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
-    int sem_id = semget(sem_key, NUM_SEMAPHORES, IPC_CREAT | IPC_EXCL | 0600);
+    // -------------------------------------------------------------
+    // CICLO SIMULAZIONE (GIORNI E MINUTI)
+    // -------------------------------------------------------------
+    const int MINUTI_PER_GIORNO = 60;
 
-    union semun arg;
+    for (int g = 1; g <= conf.sim_duration && shm_ptr->simulazione_attiva; g++) {
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        shm_ptr->giorno_corrente = g;
+        shm_ptr->utenti_serviti_oggi = 0;
+        shm_ptr->utenti_non_serviti_oggi = 0;
+        shm_ptr->ricavo_oggi = 0.0;
+        sem_v(sem_id, SEM_MUTEX_SHM);
 
-    // 1. Mutex per la Shared Memory (deve partire a 1 per consentire il primo accesso)
-    arg.val = 1;
-    semctl(sem_id, SEM_MUTEX_SHM, SETVAL, arg);
+        printf("\n=========================================\n");
+        printf("         INIZIO GIORNATA %d              \n", g);
+        printf("=========================================\n");
 
-    // 2. Postazioni operatori (partono con i valori letti dalla config)
-    arg.val = conf.nof_wk_seats[STAT_PRIMI];
-    semctl(sem_id, SEM_POSTAZIONI_PRIMI, SETVAL, arg);
+        for (int m = 1; m <= MINUTI_PER_GIORNO && shm_ptr->simulazione_attiva; m++) {
+            attendi_nanosecondi(conf.n_nano_secs);
 
-    arg.val = conf.nof_wk_seats[STAT_SECONDI];
-    semctl(sem_id, SEM_POSTAZIONI_SECONDI, SETVAL, arg);
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            shm_ptr->minuto_corrente = m;
 
-    arg.val = conf.nof_wk_seats[STAT_COFFEE];
-    semctl(sem_id, SEM_POSTAZIONI_COFFEE, SETVAL, arg);
+            // Refill ogni 10 minuti
+            if (m % 10 == 0) {
+                for (int p = 0; p < 2; p++) {
+                    if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
+                        shm_ptr->porzioni_primi[p] += conf.avg_refill_primi;
+                    if (shm_ptr->porzioni_secondi[p] + conf.avg_refill_secondi <= conf.max_porzioni_secondi)
+                        shm_ptr->porzioni_secondi[p] += conf.avg_refill_secondi;
+                }
+                printf("[REFILL] Minuto %d: Ricarica porzioni effettuata.\n", m);
+            }
+            sem_v(sem_id, SEM_MUTEX_SHM);
+        }
 
-    arg.val = conf.nof_wk_seats[STAT_CASSA];
-    semctl(sem_id, SEM_POSTAZIONI_CASSA, SETVAL, arg);
+        // Stampa statistiche di fine giornata
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        printf("\n--- Report Fine Giorno %d ---\n", g);
+        printf("Utenti serviti oggi: %d\n", shm_ptr->utenti_serviti_oggi);
+        printf("Utenti non serviti oggi: %d\n", shm_ptr->utenti_non_serviti_oggi);
+        printf("Incasso giornaliero: %.2f EUR\n", shm_ptr->ricavo_oggi);
+        printf("Scorte residue primi: [%d, %d] | secondi: [%d, %d]\n",
+               shm_ptr->porzioni_primi[0], shm_ptr->porzioni_primi[1],
+               shm_ptr->porzioni_secondi[0], shm_ptr->porzioni_secondi[1]);
+        sem_v(sem_id, SEM_MUTEX_SHM);
+    }
 
-    // 3. Posti tavoli
-    arg.val = conf.nof_table_seats;
-    semctl(sem_id, SEM_TAVOLI, SETVAL, arg);
+    // Segnalazione fine simulazione
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->simulazione_attiva = 0;
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
-    printf("Posti tavoli semaforo:");
+    printf("\n=========================================\n");
+    printf("         FINE SIMULAZIONE                \n");
+    printf("Totale utenti serviti: %d\n", shm_ptr->utenti_serviti_tot);
+    printf("Totale utenti non serviti: %d\n", shm_ptr->utenti_non_serviti_tot);
+    printf("Incasso totale complessivo: %.2f EUR\n", shm_ptr->ricavo_totale);
+    printf("=========================================\n");
 
-    //Deallocazione SHM
-    shmdt(shm_ptr);
-    shmctl(shm_id, IPC_RMID, NULL);
-
-    //Deallocazione Semafori
-    semctl(sem_id, 0, IPC_RMID);
-
+    // Pulizia e attesa di tutti i processi figli
+    cleanup_resources();
     return 0;
 }

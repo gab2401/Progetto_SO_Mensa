@@ -5,23 +5,23 @@ BIN_DIR = bin
 OBJ_DIR = obj
 
 # Eseguibili previsti
-TARGETS = $(BIN_DIR)/responsabile
+TARGETS = $(BIN_DIR)/responsabile $(BIN_DIR)/cassiere $(BIN_DIR)/operatore $(BIN_DIR)/utente
 
 all: directories $(TARGETS)
 
 directories:
 	@mkdir -p $(BIN_DIR) $(OBJ_DIR)
 
-$(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o $(OBJ_DIR)/config.o
+$(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o $(OBJ_DIR)/config.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/operatore: $(OBJ_DIR)/operatore.o
+$(BIN_DIR)/operatore: $(OBJ_DIR)/operatore.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/cassiere: $(OBJ_DIR)/cassiere.o
+$(BIN_DIR)/cassiere: $(OBJ_DIR)/cassiere.o $(OBJ_DIR)/ipc_utils.o 
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/utente: $(OBJ_DIR)/utente.o
+$(BIN_DIR)/utente: $(OBJ_DIR)/utente.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c

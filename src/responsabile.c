@@ -10,18 +10,7 @@ static int msg_queue_id[NUM_STATIONS] = {-1, -1, -1, -1};
 
 // Tracciamento dei processi figli per la terminazione controllata
 static pid_t *child_pids = NULL;
-static int num_children_spawned = 0;
-
-// Funzione helper per simulare i minuti virtuali senza busy waiting
-void attendi_nanosecondi(long nanosecs) {
-    if (nanosecs <= 0) return;
-    struct timespec req, rem;
-    req.tv_sec = nanosecs / 1000000000L;
-    req.tv_nsec = nanosecs % 1000000000L;
-    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
-        req = rem; // Completa l'attesa se interrotta da un segnale non fatale
-    }
-}
+static int num_children_spawned = 0;    
 
 // Deallocazione completa di processi e risorse IPC
 void cleanup_resources(void) {

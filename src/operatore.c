@@ -22,10 +22,7 @@ static void simula_servizio(int tempo_medio_sec, int variazione_percentuale, lon
 
 int main(int argc, char *argv[]) {
 
-    void term_handler(int signum) {
-    (void)signum;
-    // Serve solo per interrompere le system call bloccanti impostando errno = EINTR
-    }
+    setup_term_handler();
 
     if (argc < 2) {
         fprintf(stderr, "Uso: %s <id_stazione>\n", argv[0]);
@@ -43,19 +40,35 @@ int main(int argc, char *argv[]) {
     // 1. Aggancio Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
-    if (shm_id == -1) { perror("[OPERATORE] shmget"); exit(EXIT_FAILURE); }
+
+    if (shm_id == -1) { 
+        perror("[OPERATORE] shmget"); 
+        exit(EXIT_FAILURE); 
+    }
+
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
-    if (shm_ptr == (void *)-1) { perror("[OPERATORE] shmat"); exit(EXIT_FAILURE); }
+
+    if (shm_ptr == (void *)-1) { 
+        perror("[OPERATORE] shmat"); 
+        exit(EXIT_FAILURE); 
+    }
 
     // 2. Recupero Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
-    if (sem_id == -1) { perror("[OPERATORE] semget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
+    if (sem_id == -1) { 
+        perror("[OPERATORE] semget"); 
+        shmdt(shm_ptr); exit(EXIT_FAILURE); 
+    }
 
     // 3. Recupero Coda Messaggi della specifica stazione
     key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + station_id);
     int msg_q_id = msgget(msg_key, 0600);
-    if (msg_q_id == -1) { perror("[OPERATORE] msgget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
+    if (msg_q_id == -1) { 
+        perror("[OPERATORE] msgget"); 
+        shmdt(shm_ptr); 
+        exit(EXIT_FAILURE); 
+    }
 
     // Mappa indice semaforo postazione
     int sem_postazione = SEM_POSTAZIONI_PRIMI + station_id;
@@ -73,13 +86,25 @@ int main(int argc, char *argv[]) {
     // Registra operatore attivo nelle statistiche
     sem_p(sem_id, SEM_MUTEX_SHM);
     shm_ptr->operatori_attivi_oggi++;
+    shm_ptr->operatori_in_servizio[station_id]++;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
     printf("[OPERATORE %d] In servizio alla stazione %d\n", getpid(), station_id);
 
     // 6. Ciclo di servizio richieste
     OrderMessage msg;
+    int pause_fatte_oggi = 0;
+    int giorno_locale = shm_ptr->giorno_corrente;
+    int clienti_serviti_da_ultima_pausa = 0;
     while (shm_ptr->simulazione_attiva) {
+
+        // Se è iniziato un nuovo giorno, azzeriamo il contatore delle pause
+        if (shm_ptr->giorno_corrente != giorno_locale) {
+            giorno_locale = shm_ptr->giorno_corrente;
+            pause_fatte_oggi = 0;
+            clienti_serviti_da_ultima_pausa = 0;
+        }
+
         ssize_t res = msgrcv(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 1, 0);
         if (res == -1) {
             if (errno == EINTR || errno == EIDRM) break;
@@ -124,11 +149,62 @@ int main(int argc, char *argv[]) {
         // Risposta mirata al PID dell'utente richiedente
         msg.mtype = msg.sender_pid;
         msgsnd(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 0);
+
+        clienti_serviti_da_ultima_pausa++;
+
+    // Ogni tot clienti serviti (es. almeno 2), valuta se andare in pausa
+    if (clienti_serviti_da_ultima_pausa >= 2 && pause_fatte_oggi < 2) {
+        // Decide casualmente se staccare (es. 30% di probabilità)
+        if ((rand() % 10) < 3) {
+            int puo_andare_in_pausa = 0;
+
+            // Controllo in mutua esclusione del vincolo di presidio minimo
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            if (shm_ptr->operatori_in_servizio[station_id] > 1) {
+                shm_ptr->operatori_in_servizio[station_id]--;
+                shm_ptr->pause_effettuate_oggi++;
+                shm_ptr->pause_totali++;
+                puo_andare_in_pausa = 1;
+            }
+            sem_v(sem_id, SEM_MUTEX_SHM);
+
+            if (puo_andare_in_pausa) {
+                pause_fatte_oggi++;
+                clienti_serviti_da_ultima_pausa = 0;
+
+                // 1. Lascia libera la postazione fisica per un collega
+                sem_v(sem_id, sem_postazione);
+                printf("[OPERATORE %d] Va in pausa (stazione %d, pausa %d)\n",
+                       getpid(), station_id, pause_fatte_oggi);
+
+                // 2. Simula la durata della pausa con attesa passiva (es. 2 minuti virtuali)
+                attendi_nanosecondi(2 * 5000000L);
+
+                // 3. Rientro: compete nuovamente per una postazione libera
+                if (shm_ptr->simulazione_attiva) {
+                    sem_p(sem_id, sem_postazione);
+                    sem_p(sem_id, SEM_MUTEX_SHM);
+                    shm_ptr->operatori_in_servizio[station_id]++;
+                    sem_v(sem_id, SEM_MUTEX_SHM);
+                    printf("[OPERATORE %d] Rientrato dalla pausa alla stazione %d\n",
+                           getpid(), station_id);
+                }
+            }
+        }
+        }
     }
 
     // Rilascio postazione all'uscita
     sem_v(sem_id, sem_postazione);
     shmdt(shm_ptr);
     printf("[OPERATORE %d] Chiusura servizio.\n", getpid());
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    if (shm_ptr->operatori_in_servizio[station_id] > 0) {
+        shm_ptr->operatori_in_servizio[station_id]--;
+    }
+    sem_v(sem_id, SEM_MUTEX_SHM);
+
+    sem_v(sem_id, sem_postazione);
+    shmdt(shm_ptr);
     return 0;
 }

@@ -1,12 +1,11 @@
 #include "common.h"
 #include "ipc_utils.h"
 
+
+
 int main(int argc, char *argv[]) {
 
-    void term_handler(int signum) {
-    (void)signum;
-    // Serve solo per interrompere le system call bloccanti impostando errno = EINTR
-    }
+    setup_term_handler();
 
     (void)argc;
     (void)argv;

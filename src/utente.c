@@ -1,9 +1,9 @@
 #include "common.h"
 #include "ipc_utils.h"
 
-// Handler vuoto per svegliare le system call bloccanti su interruzione
 static void sigterm_handler(int signum) {
     (void)signum;
+    _exit(EXIT_SUCCESS); // Termina immediatamente il processo figlio senza passare per pulizie complesse
 }
 
 // Funzione helper per simulare il tempo di consumo pasti tramite nanosleep
@@ -57,14 +57,25 @@ int main(int argc, char *argv[]) {
     // 1. Aggancio Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
-    if (shm_id == -1) { perror("[UTENTE] shmget"); exit(EXIT_FAILURE); }
+    if (shm_id == -1) { 
+        perror("[UTENTE] shmget"); 
+        exit(EXIT_FAILURE); 
+    }
+
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
-    if (shm_ptr == (void *)-1) { perror("[UTENTE] shmat"); exit(EXIT_FAILURE); }
+
+    if (shm_ptr == (void *)-1) { 
+        perror("[UTENTE] shmat"); 
+        exit(EXIT_FAILURE); 
+    }
 
     // 2. Recupero Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
-    if (sem_id == -1) { perror("[UTENTE] semget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
+    if (sem_id == -1) { 
+        perror("[UTENTE] semget"); 
+        shmdt(shm_ptr); exit(EXIT_FAILURE); 
+    }
 
     // 3. Recupero Code Messaggi per le 4 stazioni
     int msg_q[NUM_STATIONS];
@@ -86,7 +97,10 @@ int main(int argc, char *argv[]) {
 
         // Esegue il giro mensa una sola volta al giorno
         if (giorno_attuale == ultimo_giorno_servito) {
-            struct timespec poll_time = {0, 10000000L}; // Breve attesa passiva di 10ms
+            if (!shm_ptr->simulazione_attiva) {
+                break; // Se la simulazione è finita, esce dal while
+            }
+            struct timespec poll_time = {0, 10000000L};
             nanosleep(&poll_time, NULL);
             continue;
         }
@@ -107,7 +121,10 @@ int main(int argc, char *argv[]) {
                 ha_primo = 1;
             }
         }
-        if (ha_primo) { conto_totale += 4.50; num_portate++; }
+        if (ha_primo) { 
+            conto_totale += 4.50; 
+            num_portate++; 
+        }
 
         // --- STAZIONE SECONDI ---
         int scelta_s = rand() % 2;

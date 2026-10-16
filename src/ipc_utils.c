@@ -20,7 +20,7 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
         return -1;
     }
 
-    // Inizializzazione campi
+    // Inizializzazione dati
     memset(ptr, 0, sizeof(SharedData));
     ptr->simulazione_attiva = 1;
     ptr->giorno_corrente = 1;
@@ -49,11 +49,15 @@ int init_semaphores(const Config *conf) {
 
     union semun arg;
 
-    // Mutex Shared Memory
+    // 1. Mutex per la memoria condivisa (valore = 1)
+    arg.val = 1;
+    if (semctl(sem_id, SEM_MUTEX_SHM, SETVAL, arg) == -1) return -1;
+
+    // 2. Barriera di sincronizzazione iniziale (conta tutti i processi figli)
     arg.val = conf->nof_workers + conf->nof_users;
     if (semctl(sem_id, SEM_BARRIERA_START, SETVAL, arg) == -1) return -1;
 
-    // Postazioni per le stazioni
+    // 3. Postazioni per le stazioni
     arg.val = conf->nof_wk_seats[STAT_PRIMI];
     if (semctl(sem_id, SEM_POSTAZIONI_PRIMI, SETVAL, arg) == -1) return -1;
 
@@ -66,7 +70,7 @@ int init_semaphores(const Config *conf) {
     arg.val = conf->nof_wk_seats[STAT_CASSA];
     if (semctl(sem_id, SEM_POSTAZIONI_CASSA, SETVAL, arg) == -1) return -1;
 
-    // Tavoli mensa
+    // 4. Tavoli mensa
     arg.val = conf->nof_table_seats;
     if (semctl(sem_id, SEM_TAVOLI, SETVAL, arg) == -1) return -1;
 
@@ -97,6 +101,29 @@ int init_message_queues(int msg_queue_ids[NUM_STATIONS]) {
         }
     }
     return 0;
+}
+
+// Handler per risvegliare le chiamate bloccanti su interruzione (EINTR)
+static void term_handler(int signum) {
+    (void)signum;
+}
+
+void setup_term_handler(void) {
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = term_handler;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGTERM, &sa, NULL);
+}
+
+void attendi_nanosecondi(long nanosecs) {
+    if (nanosecs <= 0) return;
+    struct timespec req, rem;
+    req.tv_sec = nanosecs / 1000000000L;
+    req.tv_nsec = nanosecs % 1000000000L;
+    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
+        req = rem;
+    }
 }
 
 // Operazione P (Wait): decrementa e blocca se <= 0

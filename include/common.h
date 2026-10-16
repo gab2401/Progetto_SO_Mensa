@@ -106,6 +106,9 @@ typedef struct {
     // Controllo terminazione
     int utenti_in_coda_a_fine_giorno;
     int motivo_terminazione;    // 0: timeout, 1: overload
+    
+    // Operatori attualmente presenti e attivi alla stazione (per evitare stazioni vuote)
+    int operatori_in_servizio[NUM_STATIONS];
 } SharedData;
 
 // Messaggio per code IPC (scambio tra Utente e Operatore/Cassiere)

@@ -1,5 +1,5 @@
-#include "common.h"
-#include "ipc_utils.h"
+#include "../include/common.h"
+#include "../include/ipc_utils.h"
 
 static void sigterm_handler(int signum) {
     (void)signum;

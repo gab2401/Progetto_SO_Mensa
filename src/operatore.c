@@ -1,5 +1,5 @@
-#include "common.h"
-#include "ipc_utils.h"
+#include "../include/common.h"
+#include "../include/ipc_utils.h"
 
 // Funzione helper per simulare il tempo di servizio con variazione percentuale
 static void simula_servizio(int tempo_medio_sec, int variazione_percentuale, long n_nano_secs) {

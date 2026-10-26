@@ -68,7 +68,6 @@ pid_t avvia_processo(const char *bin_path, char *const args[]) {
     }
     if (pid == 0) {
         execve(bin_path, args, NULL);
-        // Se execve fallisce, termina immediatamente il processo duplicato
         perror("Errore execve");
         _exit(EXIT_FAILURE);
     }
@@ -109,6 +108,14 @@ int main(int argc, char *argv[]) {
 
     if (init_message_queues(msg_queue_id) == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
 
+    shm_id = init_shared_memory(&conf, &shm_ptr);
+    if (shm_id == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+
+    // Caricamento del menù nella memoria condivisa
+    if (parse_menu("config/menu.txt", shm_ptr) == -1) {
+        fprintf(stderr, "Avviso: impossibile caricare config/menu.txt\n");
+    }
+
     // Allocazione array dei PID
     int totale_figli = conf.nof_workers + conf.nof_users;
     child_pids = malloc(sizeof(pid_t) * totale_figli);
@@ -130,12 +137,26 @@ int main(int argc, char *argv[]) {
 
     // 2. Avvio Operatori (garantendo almeno 1 operatore per stazione primi, secondi, caffe')
     int operatori_da_creare = conf.nof_workers - 1;
+    int op_assegnati[3] = {0, 0, 0};
+
     for (int i = 0; i < operatori_da_creare; i++) {
-        int staz_id;
-        if (i == 0) staz_id = STAT_PRIMI;
-        else if (i == 1) staz_id = STAT_SECONDI;
-        else if (i == 2) staz_id = STAT_COFFEE;
-        else staz_id = (i % 3); // Distribuzione dei rimanenti tra le stazioni
+        int staz_id = 0;
+        if (i < 3) {
+            // Garantiamo almeno 1 operatore per stazione (Primi, Secondi, Caffè)
+            staz_id = i;
+        } else {
+            // Criterio preferenziale: scegliamo la stazione con il rapporto (avg_srvc / op_assegnati) maggiore
+            double max_ratio = -1.0;
+            for (int s = 0; s < 3; s++) {
+                int div = op_assegnati[s] == 0 ? 1 : op_assegnati[s];
+                double ratio = (double)conf.avg_srvc[s] / (double)div;
+                if (ratio > max_ratio) {
+                    max_ratio = ratio;
+                    staz_id = s;
+                }
+            }
+        }
+        op_assegnati[staz_id]++;
 
         char staz_arg[16];
         snprintf(staz_arg, sizeof(staz_arg), "%d", staz_id);
@@ -189,16 +210,24 @@ int main(int argc, char *argv[]) {
                 for (int p = 0; p < 2; p++) {
                     if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
                         shm_ptr->porzioni_primi[p] += conf.avg_refill_primi;
+                    else
+                        shm_ptr->porzioni_primi[p] = conf.max_porzioni_primi;
+
                     if (shm_ptr->porzioni_secondi[p] + conf.avg_refill_secondi <= conf.max_porzioni_secondi)
                         shm_ptr->porzioni_secondi[p] += conf.avg_refill_secondi;
+                    else
+                        shm_ptr->porzioni_secondi[p] = conf.max_porzioni_secondi;
                 }
                 printf("[REFILL] Minuto %d: Ricarica porzioni effettuata.\n", m);
             }
             sem_v(sem_id, SEM_MUTEX_SHM);
         }
 
-        // Stampa statistiche di fine giornata
+        // Calcolo utenti rimasti in coda a fine giornata
         sem_p(sem_id, SEM_MUTEX_SHM);
+        int utenti_in_attesa = conf.nof_users - shm_ptr->utenti_serviti_oggi;
+        shm_ptr->utenti_non_serviti_oggi = utenti_in_attesa;
+        shm_ptr->utenti_non_serviti_tot += utenti_in_attesa;
         printf("\n--- Report Fine Giorno %d ---\n", g);
         printf("Utenti serviti oggi: %d\n", shm_ptr->utenti_serviti_oggi);
         printf("Utenti non serviti oggi: %d\n", shm_ptr->utenti_non_serviti_oggi);
@@ -206,6 +235,14 @@ int main(int argc, char *argv[]) {
         printf("Scorte residue primi: [%d, %d] | secondi: [%d, %d]\n",
                shm_ptr->porzioni_primi[0], shm_ptr->porzioni_primi[1],
                shm_ptr->porzioni_secondi[0], shm_ptr->porzioni_secondi[1]);
+        // Verifica condizione di OVERLOAD
+        if (utenti_in_attesa > conf.overload_threshold) {
+            printf("\n[ATTENZIONE] Rilevato OVERLOAD: %d utenti in attesa superano la soglia (%d)!\n", utenti_in_attesa, conf.overload_threshold);
+            shm_ptr->motivo_terminazione = 1; // 1 = Overload
+            shm_ptr->simulazione_attiva = 0;
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            break;
+        }
         sem_v(sem_id, SEM_MUTEX_SHM);
     }
 
@@ -214,12 +251,35 @@ int main(int argc, char *argv[]) {
     shm_ptr->simulazione_attiva = 0;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->simulazione_attiva = 0;
+
     printf("\n=========================================\n");
     printf("         FINE SIMULAZIONE                \n");
+    if (shm_ptr->motivo_terminazione == 1) {
+        printf("Causa terminazione: OVERLOAD (soglia superata)\n");
+    } else {
+        printf("Causa terminazione: TIMEOUT (raggiunti %d giorni)\n", conf.sim_duration);
+    }
     printf("Totale utenti serviti: %d\n", shm_ptr->utenti_serviti_tot);
     printf("Totale utenti non serviti: %d\n", shm_ptr->utenti_non_serviti_tot);
     printf("Incasso totale complessivo: %.2f EUR\n", shm_ptr->ricavo_totale);
+    printf("Pause totali effettuate dagli operatori: %d\n", shm_ptr->pause_totali);
+
+    printf("\n--- Tempi Medi di Attesa ---\n");
+    const char *nomi_stazioni[] = {"Primi", "Secondi", "Coffee", "Cassa"};
+    for (int s = 0; s < NUM_STATIONS; s++) {
+        if (shm_ptr->ordini_completati[s] > 0) {
+            double attesa_ms = (double)shm_ptr->tempo_attesa_totale[s] / 
+                               (shm_ptr->ordini_completati[s] * 1000000.0);
+            printf("Stazione %s: %.2f ms (su %d ordini)\n",
+                   nomi_stazioni[s], attesa_ms, shm_ptr->ordini_completati[s]);
+        } else {
+            printf("Stazione %s: N/D (0 ordini)\n", nomi_stazioni[s]);
+        }
+    }
     printf("=========================================\n");
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
     // Pulizia e attesa di tutti i processi figli
     cleanup_resources();

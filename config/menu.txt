@@ -1,3 +1,13 @@
-PRIMI: Spaghetti al Pomodoro; Risotto ai Funghi
-SECONDI: Pollo al Forno con Patate; Merluzzo con Insalata
-COFFEE: Normale; Macchiato; Decaffeinato; Ginseng
+# Primi piatti (2 opzioni: indice 0 e 1)
+Pasta al Pomodoro
+Risotto ai Funghi
+
+# Secondi piatti (2 opzioni: indice 0 e 1)
+Cotoletta con Patate
+Arrosto di Tacchino
+
+# Caffetteria (4 opzioni: indici da 0 a 3)
+Espresso
+Caffe Macchiato
+Cappuccino
+Caffe Decaffeinato

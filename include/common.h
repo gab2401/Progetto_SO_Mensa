@@ -79,6 +79,8 @@ typedef struct {
 
 // Struttura in Shared Memory per lo stato globale e le statistiche
 typedef struct {
+    Config conf;
+
     int simulazione_attiva;     // 1 attiva, 0 stop
     int giorno_corrente;        // Giorno in corso
     int minuto_corrente;        // Minuto virtuale del giorno corrente (per refill ogni 10 min)
@@ -109,6 +111,15 @@ typedef struct {
     
     // Operatori attualmente presenti e attivi alla stazione (per evitare stazioni vuote)
     int operatori_in_servizio[NUM_STATIONS];
+
+    // Statistiche tempi di attesa (in nanosecondi)
+    long tempo_attesa_totale[NUM_STATIONS];
+    int ordini_completati[NUM_STATIONS];
+
+    // Nomi dei piatti caricati da menu.txt
+    char nomi_primi[2][64];
+    char nomi_secondi[2][64];
+    char nomi_coffee[4][64];
 } SharedData;
 
 // Messaggio per code IPC (scambio tra Utente e Operatore/Cassiere)

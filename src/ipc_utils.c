@@ -9,8 +9,18 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
 
     int shm_id = shmget(shm_key, sizeof(SharedData), IPC_CREAT | IPC_EXCL | 0600);
     if (shm_id == -1) {
-        perror("Errore shmget");
-        return -1;
+        // Se il segmento esiste gia' a causa di un crash precedente, lo rimuoviamo e ricreiamo
+        if (errno == EEXIST) {
+            int old_id = shmget(shm_key, sizeof(SharedData), 0600);
+            if (old_id != -1) {
+                shmctl(old_id, IPC_RMID, NULL);
+            }
+            shm_id = shmget(shm_key, sizeof(SharedData), IPC_CREAT | IPC_EXCL | 0600);
+        }
+        if (shm_id == -1) {
+            perror("Errore shmget");
+            return -1;
+        }
     }
 
     SharedData *ptr = (SharedData *)shmat(shm_id, NULL, 0);
@@ -22,6 +32,7 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
 
     // Inizializzazione dati
     memset(ptr, 0, sizeof(SharedData));
+    ptr->conf = *conf;
     ptr->simulazione_attiva = 1;
     ptr->giorno_corrente = 1;
     ptr->minuto_corrente = 0;

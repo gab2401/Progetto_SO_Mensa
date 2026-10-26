@@ -1,5 +1,50 @@
 #include "config.h"
 
+int parse_menu(const char *filepath, SharedData *shm_ptr) {
+    FILE *fp = fopen(filepath, "r");
+    if (fp == NULL) {
+        perror("Errore apertura menu.txt (uso nomi di default)");
+        // Fallback su nomi predefiniti in caso di assenza file
+        strncpy(shm_ptr->nomi_primi[0], "Primo A", 64);
+        strncpy(shm_ptr->nomi_primi[1], "Primo B", 64);
+        strncpy(shm_ptr->nomi_secondi[0], "Secondo A", 64);
+        strncpy(shm_ptr->nomi_secondi[1], "Secondo B", 64);
+        strncpy(shm_ptr->nomi_coffee[0], "Espresso", 64);
+        strncpy(shm_ptr->nomi_coffee[1], "Macchiato", 64);
+        strncpy(shm_ptr->nomi_coffee[2], "Cappuccino", 64);
+        strncpy(shm_ptr->nomi_coffee[3], "Decaffeinato", 64);
+        return 0;
+    }
+
+    char line[128];
+    int count = 0;
+
+    while (fgets(line, sizeof(line), fp) != NULL) {
+        // Rimuove eventuale newline finale
+        line[strcspn(line, "\r\n")] = '\0';
+
+        // Salta righe vuote o commenti
+        if (line[0] == '\0' || line[0] == '#') {
+            continue;
+        }
+
+        if (count < 2) {
+            strncpy(shm_ptr->nomi_primi[count], line, 63);
+            shm_ptr->nomi_primi[count][63] = '\0';
+        } else if (count < 4) {
+            strncpy(shm_ptr->nomi_secondi[count - 2], line, 63);
+            shm_ptr->nomi_secondi[count - 2][63] = '\0';
+        } else if (count < 8) {
+            strncpy(shm_ptr->nomi_coffee[count - 4], line, 63);
+            shm_ptr->nomi_coffee[count - 4][63] = '\0';
+        }
+        count++;
+    }
+
+    fclose(fp);
+    return 0;
+}
+
 int parse_config(const char *filepath, Config *conf) {
     FILE *fp = fopen(filepath, "r");
     if (fp == NULL) {

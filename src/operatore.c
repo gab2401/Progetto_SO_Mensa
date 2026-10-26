@@ -1,5 +1,5 @@
-#include "common.h"
-#include "ipc_utils.h"
+#include "../include/common.h"
+#include "../include/ipc_utils.h"
 
 // Funzione helper per simulare il tempo di servizio con variazione percentuale
 static void simula_servizio(int tempo_medio_sec, int variazione_percentuale, long n_nano_secs) {
@@ -58,16 +58,17 @@ int main(int argc, char *argv[]) {
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
     if (sem_id == -1) { 
         perror("[OPERATORE] semget"); 
-        shmdt(shm_ptr); exit(EXIT_FAILURE); 
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
     }
 
     // 3. Recupero Coda Messaggi della specifica stazione
     key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + station_id);
     int msg_q_id = msgget(msg_key, 0600);
-    if (msg_q_id == -1) { 
-        perror("[OPERATORE] msgget"); 
-        shmdt(shm_ptr); 
-        exit(EXIT_FAILURE); 
+    if (msg_q_id == -1) {
+        perror("[OPERATORE] msgget");
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
     }
 
     // Mappa indice semaforo postazione
@@ -96,6 +97,7 @@ int main(int argc, char *argv[]) {
     int pause_fatte_oggi = 0;
     int giorno_locale = shm_ptr->giorno_corrente;
     int clienti_serviti_da_ultima_pausa = 0;
+
     while (shm_ptr->simulazione_attiva) {
 
         // Se è iniziato un nuovo giorno, azzeriamo il contatore delle pause
@@ -152,59 +154,64 @@ int main(int argc, char *argv[]) {
 
         clienti_serviti_da_ultima_pausa++;
 
-    // Ogni tot clienti serviti (es. almeno 2), valuta se andare in pausa
-    if (clienti_serviti_da_ultima_pausa >= 2 && pause_fatte_oggi < 2) {
-        // Decide casualmente se staccare (es. 30% di probabilità)
-        if ((rand() % 10) < 3) {
-            int puo_andare_in_pausa = 0;
+        // Ogni tot clienti serviti (es. almeno 2), valuta se andare in pausa
+        if (clienti_serviti_da_ultima_pausa >= 2 && pause_fatte_oggi < 2) {
+            // Decide casualmente se staccare (es. 30% di probabilità)
+            if ((rand() % 10) < 3) {
+                int puo_andare_in_pausa = 0;
 
-            // Controllo in mutua esclusione del vincolo di presidio minimo
-            sem_p(sem_id, SEM_MUTEX_SHM);
-            if (shm_ptr->operatori_in_servizio[station_id] > 1) {
-                shm_ptr->operatori_in_servizio[station_id]--;
-                shm_ptr->pause_effettuate_oggi++;
-                shm_ptr->pause_totali++;
-                puo_andare_in_pausa = 1;
-            }
-            sem_v(sem_id, SEM_MUTEX_SHM);
+                // Controllo in mutua esclusione del vincolo di presidio minimo
+                sem_p(sem_id, SEM_MUTEX_SHM);
+                if (shm_ptr->operatori_in_servizio[station_id] > 1) {
+                    shm_ptr->operatori_in_servizio[station_id]--;
+                    shm_ptr->pause_effettuate_oggi++;
+                    shm_ptr->pause_totali++;
+                    puo_andare_in_pausa = 1;
+                }
+                sem_v(sem_id, SEM_MUTEX_SHM);
 
-            if (puo_andare_in_pausa) {
-                pause_fatte_oggi++;
-                clienti_serviti_da_ultima_pausa = 0;
+                if (puo_andare_in_pausa) {
+                    pause_fatte_oggi++;
+                    clienti_serviti_da_ultima_pausa = 0;
 
-                // 1. Lascia libera la postazione fisica per un collega
-                sem_v(sem_id, sem_postazione);
-                printf("[OPERATORE %d] Va in pausa (stazione %d, pausa %d)\n",
-                       getpid(), station_id, pause_fatte_oggi);
+                    // 1. Lascia libera la postazione fisica per un collega
+                    sem_v(sem_id, sem_postazione);
+                    printf("[OPERATORE %d] Va in pausa (stazione %d, pausa %d)\n",
+                           getpid(), station_id, pause_fatte_oggi);
 
-                // 2. Simula la durata della pausa con attesa passiva (es. 2 minuti virtuali)
-                attendi_nanosecondi(2 * 5000000L);
+                    // 2. Simula la durata della pausa con attesa passiva (es. 2 minuti virtuali)
+                    attendi_nanosecondi(2 * 5000000L);
 
-                // 3. Rientro: compete nuovamente per una postazione libera
-                if (shm_ptr->simulazione_attiva) {
-                    sem_p(sem_id, sem_postazione);
-                    sem_p(sem_id, SEM_MUTEX_SHM);
-                    shm_ptr->operatori_in_servizio[station_id]++;
-                    sem_v(sem_id, SEM_MUTEX_SHM);
-                    printf("[OPERATORE %d] Rientrato dalla pausa alla stazione %d\n",
-                           getpid(), station_id);
+                    // 3. Rientro: compete nuovamente per una postazione libera
+                    if (shm_ptr->simulazione_attiva) {
+                        sem_p(sem_id, sem_postazione);
+                        sem_p(sem_id, SEM_MUTEX_SHM);
+                        shm_ptr->operatori_in_servizio[station_id]++;
+                        sem_v(sem_id, SEM_MUTEX_SHM);
+                        printf("[OPERATORE %d] Rientrato dalla pausa alla stazione %d\n",
+                               getpid(), station_id);
+                    }
                 }
             }
         }
-        }
     }
 
-    // Rilascio postazione all'uscita
-    sem_v(sem_id, sem_postazione);
-    shmdt(shm_ptr);
-    printf("[OPERATORE %d] Chiusura servizio.\n", getpid());
+    // --- SEZIONE DI CHIUSURA ---
+
+    // 1. Aggiorna le statistiche in Shared Memory prima del distacco
     sem_p(sem_id, SEM_MUTEX_SHM);
     if (shm_ptr->operatori_in_servizio[station_id] > 0) {
         shm_ptr->operatori_in_servizio[station_id]--;
     }
     sem_v(sem_id, SEM_MUTEX_SHM);
 
+    // 2. Rilascia la postazione fisica
     sem_v(sem_id, sem_postazione);
+
+    printf("[OPERATORE %d] Chiusura servizio.\n", getpid());
+
+    // 3. Distacco finale della Shared Memory
     shmdt(shm_ptr);
+
     return 0;
 }

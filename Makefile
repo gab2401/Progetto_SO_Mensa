@@ -1,5 +1,5 @@
 CC = gcc
-CFLAGS = -Wvla -Wextra -Werror -D_GNU_SOURCE -Iinclude
+CFLAGS = -g -Wvla -Wextra -Werror -D_GNU_SOURCE -Iinclude
 SRC_DIR = src
 BIN_DIR = bin
 OBJ_DIR = obj

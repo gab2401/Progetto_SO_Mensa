@@ -1,19 +1,6 @@
 #include "common.h"
 #include "ipc_utils.h"
 
-// Funzione helper per simulare il tempo di servizio con variazione percentuale
-static void simula_servizio(int tempo_medio_sec, int variazione_percentuale, long n_nano_secs) {
-    if (tempo_medio_sec <= 0) return;
-
-    // Calcolo scostamento casuale tra -variazione e +variazione
-    int delta_percentuale = (rand() % (2 * variazione_percentuale + 1)) - variazione_percentuale;
-    double fattore = 1.0 + (delta_percentuale / 100.0);
-    double minuti_virtuali = tempo_medio_sec * fattore;
-
-    long totale_nanosecs = (long)(minuti_virtuali * n_nano_secs);
-    attendi_nanosecondi(totale_nanosecs);
-}
-
 int main(int argc, char *argv[]) {
     setup_term_handler();
 
@@ -33,33 +20,33 @@ int main(int argc, char *argv[]) {
     // 1. Aggancio Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
-    if (shm_id == -1) { 
-        perror("[OPERATORE] shmget"); 
-        exit(EXIT_FAILURE); 
+    if (shm_id == -1) {
+        perror("[OPERATORE] shmget");
+        exit(EXIT_FAILURE);
     }
 
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
-    if (shm_ptr == (void *)-1) { 
-        perror("[OPERATORE] shmat"); 
-        exit(EXIT_FAILURE); 
+    if (shm_ptr == (void *)-1) {
+        perror("[OPERATORE] shmat");
+        exit(EXIT_FAILURE);
     }
 
     // 2. Recupero Set di Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
-    if (sem_id == -1) { 
-        perror("[OPERATORE] semget"); 
-        shmdt(shm_ptr); 
-        exit(EXIT_FAILURE); 
+    if (sem_id == -1) {
+        perror("[OPERATORE] semget");
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
     }
 
     // 3. Recupero Coda Messaggi della stazione assegnata
     key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + station_id);
     int msg_q_id = msgget(msg_key, 0600);
-    if (msg_q_id == -1) { 
-        perror("[OPERATORE] msgget"); 
-        shmdt(shm_ptr); 
-        exit(EXIT_FAILURE); 
+    if (msg_q_id == -1) {
+        perror("[OPERATORE] msgget");
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
     }
 
     int sem_postazione = SEM_POSTAZIONI_PRIMI + station_id;
@@ -74,9 +61,9 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // Registrazione dell'operatore in servizio
     sem_p(sem_id, SEM_MUTEX_SHM);
     shm_ptr->operatori_attivi_oggi++;
+    shm_ptr->operatori_attivi_tot++;
     shm_ptr->operatori_in_servizio[station_id]++;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
@@ -85,39 +72,38 @@ int main(int argc, char *argv[]) {
     // 6. Ciclo di servizio richieste
     OrderMessage msg;
     int pause_fatte_oggi = 0;
-    int giorno_locale = shm_ptr->giorno_corrente;
+    int giorno_locale = 1;
     int clienti_serviti_da_ultima_pausa = 0;
 
     while (shm_ptr->simulazione_attiva) {
-        // Reset contatori al cambio di giornata
-        if (shm_ptr->giorno_corrente != giorno_locale) {
-            giorno_locale = shm_ptr->giorno_corrente;
-            pause_fatte_oggi = 0;
-            clienti_serviti_da_ultima_pausa = 0;
-        }
-
-        // Ricezione comanda generica per la stazione
         ssize_t res = msgrcv(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 1, 0);
         if (res == -1) {
             if (errno == EINTR || errno == EIDRM) break;
             continue;
         }
 
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        int g_curr = shm_ptr->giorno_corrente;
+        if (g_curr != giorno_locale) {
+            giorno_locale = g_curr;
+            pause_fatte_oggi = 0;
+            clienti_serviti_da_ultima_pausa = 0;
+            shm_ptr->operatori_attivi_oggi++;
+            shm_ptr->operatori_attivi_tot++;
+        }
+
+        // Controllo se l'utente era in coda da una giornata ormai terminata
+        if (msg.giorno != g_curr) {
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            msg.status = -2; // Giorno scaduto -> abbandono
+            msg.mtype = msg.sender_pid;
+            msgsnd(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 0);
+            continue;
+        }
+
         int piatto_disponibile = 0;
         int scelta = msg.dish_choice;
 
-        // Recupero nome del piatto dal menù caricato in SHM
-        const char *nome_piatto = "Non disponibile";
-        if (station_id == STAT_PRIMI && scelta >= 0 && scelta < 2) {
-            nome_piatto = shm_ptr->nomi_primi[scelta];
-        } else if (station_id == STAT_SECONDI && scelta >= 0 && scelta < 2) {
-            nome_piatto = shm_ptr->nomi_secondi[scelta];
-        } else if (station_id == STAT_COFFEE && scelta >= 0 && scelta < 4) {
-            nome_piatto = shm_ptr->nomi_coffee[scelta];
-        }
-
-        // Controllo porzioni e aggiornamento piatti distribuiti
-        sem_p(sem_id, SEM_MUTEX_SHM);
         if (station_id == STAT_PRIMI) {
             if (scelta >= 0 && scelta < 2 && shm_ptr->porzioni_primi[scelta] > 0) {
                 shm_ptr->porzioni_primi[scelta]--;
@@ -139,17 +125,15 @@ int main(int argc, char *argv[]) {
         }
         sem_v(sem_id, SEM_MUTEX_SHM);
 
-        // Simulazione erogazione cibo
+        // Simulazione erogazione cibo (±50% primi/secondi, ±80% caffè)
         if (piatto_disponibile) {
             int variazione = (station_id == STAT_COFFEE) ? 80 : 50;
             simula_servizio(shm_ptr->conf.avg_srvc[station_id], variazione, shm_ptr->conf.n_nano_secs);
-            msg.status = 0; // Successo
-            (void)nome_piatto; // Utilizzabile per eventuali log a terminale
+            msg.status = 0;
         } else {
-            msg.status = -1; // Piatto esaurito
+            msg.status = -1;
         }
 
-        // Risposta mirata al PID dell'utente
         msg.mtype = msg.sender_pid;
         msgsnd(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 0);
 
@@ -160,7 +144,6 @@ int main(int argc, char *argv[]) {
             if ((rand() % 10) < 3) {
                 int puo_andare_in_pausa = 0;
 
-                // Vincolo di presidio minimo: almeno un altro operatore attivo sulla postazione
                 sem_p(sem_id, SEM_MUTEX_SHM);
                 if (shm_ptr->operatori_in_servizio[station_id] > 1) {
                     shm_ptr->operatori_in_servizio[station_id]--;
@@ -174,15 +157,12 @@ int main(int argc, char *argv[]) {
                     pause_fatte_oggi++;
                     clienti_serviti_da_ultima_pausa = 0;
 
-                    // Rilascia la postazione fisica
                     sem_v(sem_id, sem_postazione);
                     printf("[OPERATORE %d] Va in pausa (stazione %d, pausa %d)\n",
                            getpid(), station_id, pause_fatte_oggi);
 
-                    // Attesa passiva proporzionale a N_NANO_SECS
                     attendi_nanosecondi(2 * shm_ptr->conf.n_nano_secs);
 
-                    // Rientro dalla pausa
                     if (shm_ptr->simulazione_attiva) {
                         if (sem_p(sem_id, sem_postazione) == -1) {
                             break;
@@ -198,7 +178,6 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Uscita controllata: aggiornamento contatori prima del distacco dalla SHM
     sem_p(sem_id, SEM_MUTEX_SHM);
     if (shm_ptr->operatori_in_servizio[station_id] > 0) {
         shm_ptr->operatori_in_servizio[station_id]--;

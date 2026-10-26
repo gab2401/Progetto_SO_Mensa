@@ -1,42 +1,25 @@
 #ifndef COMMON_H
 #define COMMON_H
 
-#ifndef _GNU_SOURCE
-#define _GNU_SOURCE
-#endif
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <errno.h>
 #include <string.h>
+#include <errno.h>
+#include <time.h>
+#include <signal.h>
 #include <sys/types.h>
 #include <sys/ipc.h>
 #include <sys/shm.h>
 #include <sys/sem.h>
 #include <sys/msg.h>
 #include <sys/wait.h>
-#include <signal.h>
-#include <time.h>
 
-#define FTOK_PATH "Makefile"
-#define FTOK_PROJ_SHM 10
-#define FTOK_PROJ_SEM 20
-#define FTOK_PROJ_MSG_BASE 30 // offset per code stazioni
+#define FTOK_PATH "."
+#define FTOK_PROJ_SHM 'S'
+#define FTOK_PROJ_SEM 'M'
+#define FTOK_PROJ_MSG_BASE 100
 
-// Union richiesta esplicitamente su Linux per semctl()
-#if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
-/* union semun e' gia' definita */
-#else
-union semun {
-    int val;                    // Valore per SETVAL
-    struct semid_ds *buf;       // Buffer per IPC_STAT, IPC_SET
-    unsigned short *array;      // Array per GETALL, SETALL
-    struct seminfo *__buf;      // Buffer per IPC_INFO
-};
-#endif
-
-// Tipi di stazione
 typedef enum {
     STAT_PRIMI = 0,
     STAT_SECONDI,
@@ -45,19 +28,24 @@ typedef enum {
     NUM_STATIONS
 } StationType;
 
-// Indici per il set di semafori (semget)
 enum {
-    SEM_MUTEX_SHM = 0,     // Protezione lettura/scrittura memoria condivisa
-    SEM_POSTAZIONI_PRIMI,  // Postazioni disponibili primi
-    SEM_POSTAZIONI_SECONDI,// Postazioni disponibili secondi
-    SEM_POSTAZIONI_COFFEE, // Postazioni disponibili caffe'
-    SEM_POSTAZIONI_CASSA,  // Postazioni disponibili cassa
-    SEM_TAVOLI,            // Posti a tavola disponibili (NOF_TABLE_SEATS)
-    SEM_BARRIERA_START,    // Barriera per avvio sincrono di tutti i processi
+    SEM_MUTEX_SHM = 0,
+    SEM_POSTAZIONI_PRIMI,
+    SEM_POSTAZIONI_SECONDI,
+    SEM_POSTAZIONI_COFFEE,
+    SEM_POSTAZIONI_CASSA,
+    SEM_TAVOLI,
+    SEM_BARRIERA_START,
+    SEM_INIZIO_GIORNATA,
     NUM_SEMAPHORES
 };
 
-// Configurazione letta da file
+union semun {
+    int val;
+    struct semid_ds *buf;
+    unsigned short *array;
+};
+
 typedef struct {
     int sim_duration;
     long n_nano_secs;
@@ -65,6 +53,7 @@ typedef struct {
     int nof_users;
     int nof_table_seats;
     int nof_wk_seats[NUM_STATIONS];
+    int avg_srvc[NUM_STATIONS];
     int avg_refill_primi;
     int avg_refill_secondi;
     int max_porzioni_primi;
@@ -74,61 +63,62 @@ typedef struct {
     double price_primi;
     double price_secondi;
     double price_coffee;
-    int avg_srvc[NUM_STATIONS];
 } Config;
 
-// Struttura in Shared Memory per lo stato globale e le statistiche
 typedef struct {
     Config conf;
+    int simulazione_attiva;
+    int giorno_corrente;
+    int minuto_corrente;
+    int motivo_terminazione; // 0 = Timeout, 1 = Overload
 
-    int simulazione_attiva;     // 1 attiva, 0 stop
-    int giorno_corrente;        // Giorno in corso
-    int minuto_corrente;        // Minuto virtuale del giorno corrente (per refill ogni 10 min)
-    
-    // Piatti disponibili (2 tipologie per primi e secondi)
+    // Scorte piatti
     int porzioni_primi[2];
     int porzioni_secondi[2];
-    
-    // Contatori per la giornata corrente
-    int utenti_serviti_oggi;
-    int utenti_non_serviti_oggi;
-    int piatti_distribuiti_oggi[NUM_STATIONS];
-    int pause_effettuate_oggi;
-    double ricavo_oggi;
-    int operatori_attivi_oggi;
-    
-    // Statistiche complessive
-    int utenti_serviti_tot;
-    int utenti_non_serviti_tot;
-    int piatti_distribuiti_tot[NUM_STATIONS];
-    int piatti_avanzati_tot[NUM_STATIONS];
-    int pause_totali;
-    double ricavo_totale;
-    
-    // Controllo terminazione
-    int utenti_in_coda_a_fine_giorno;
-    int motivo_terminazione;    // 0: timeout, 1: overload
-    
-    // Operatori attualmente presenti e attivi alla stazione (per evitare stazioni vuote)
-    int operatori_in_servizio[NUM_STATIONS];
 
-    // Statistiche tempi di attesa (in nanosecondi)
-    long tempo_attesa_totale[NUM_STATIONS];
-    int ordini_completati[NUM_STATIONS];
-
-    // Nomi dei piatti caricati da menu.txt
+    // Nomi piatti da menu.txt
     char nomi_primi[2][64];
     char nomi_secondi[2][64];
     char nomi_coffee[4][64];
+
+    // Statistiche utenti
+    int utenti_serviti_oggi;
+    int utenti_serviti_tot;
+    int utenti_non_serviti_oggi;
+    int utenti_non_serviti_tot;
+    int utenti_finito_giornata; // Conta quanti utenti hanno concluso (serviti o non serviti) il giorno corrente
+
+    // Statistiche piatti
+    int piatti_distribuiti_oggi[NUM_STATIONS];
+    int piatti_distribuiti_tot[NUM_STATIONS];
+    int piatti_avanzati_oggi;
+    int piatti_avanzati_tot;
+
+    // Statistiche operatori e pause
+    int operatori_in_servizio[NUM_STATIONS];
+    int operatori_attivi_oggi;
+    int operatori_attivi_tot;
+    int pause_effettuate_oggi;
+    int pause_totali;
+
+    // Statistiche ricavi
+    double ricavo_oggi;
+    double ricavo_totale;
+
+    // Tempi di attesa (in nanosecondi)
+    long tempo_attesa_oggi[NUM_STATIONS];
+    int ordini_completati_oggi[NUM_STATIONS];
+    long tempo_attesa_totale[NUM_STATIONS];
+    int ordini_completati[NUM_STATIONS];
 } SharedData;
 
-// Messaggio per code IPC (scambio tra Utente e Operatore/Cassiere)
 typedef struct {
-    long mtype;          // Canale: PID del destinatario oppure 1 (richiesta generica)
-    pid_t sender_pid;    // Chi invia il messaggio
-    int dish_choice;     // 0 o 1 (per primi/secondi), o tipo caffe'
-    double importo;      // Usato per la cassa
-    int status;          // 0: successo, -1: piatto esaurito
+    long mtype;
+    pid_t sender_pid;
+    int dish_choice;
+    double importo;
+    int giorno;
+    int status; // 0 = OK, -1 = Esaurito, -2 = Giorno scaduto
 } OrderMessage;
 
 #endif

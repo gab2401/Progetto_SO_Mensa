@@ -9,7 +9,6 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
 
     int shm_id = shmget(shm_key, sizeof(SharedData), IPC_CREAT | IPC_EXCL | 0600);
     if (shm_id == -1) {
-        // Se il segmento esiste gia' a causa di un crash precedente, lo rimuoviamo e ricreiamo
         if (errno == EEXIST) {
             int old_id = shmget(shm_key, sizeof(SharedData), 0600);
             if (old_id != -1) {
@@ -30,7 +29,6 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
         return -1;
     }
 
-    // Inizializzazione dati
     memset(ptr, 0, sizeof(SharedData));
     ptr->conf = *conf;
     ptr->simulazione_attiva = 1;
@@ -54,8 +52,17 @@ int init_semaphores(const Config *conf) {
 
     int sem_id = semget(sem_key, NUM_SEMAPHORES, IPC_CREAT | IPC_EXCL | 0600);
     if (sem_id == -1) {
-        perror("Errore semget");
-        return -1;
+        if (errno == EEXIST) {
+            int old_id = semget(sem_key, NUM_SEMAPHORES, 0600);
+            if (old_id != -1) {
+                semctl(old_id, 0, IPC_RMID);
+            }
+            sem_id = semget(sem_key, NUM_SEMAPHORES, IPC_CREAT | IPC_EXCL | 0600);
+        }
+        if (sem_id == -1) {
+            perror("Errore semget");
+            return -1;
+        }
     }
 
     union semun arg;
@@ -68,7 +75,11 @@ int init_semaphores(const Config *conf) {
     arg.val = conf->nof_workers + conf->nof_users;
     if (semctl(sem_id, SEM_BARRIERA_START, SETVAL, arg) == -1) return -1;
 
-    // 3. Postazioni per le stazioni
+    // 3. Semaforo di inizio giornata (parte bloccato a 0)
+    arg.val = 0;
+    if (semctl(sem_id, SEM_INIZIO_GIORNATA, SETVAL, arg) == -1) return -1;
+
+    // 4. Postazioni per le stazioni
     arg.val = conf->nof_wk_seats[STAT_PRIMI];
     if (semctl(sem_id, SEM_POSTAZIONI_PRIMI, SETVAL, arg) == -1) return -1;
 
@@ -81,7 +92,7 @@ int init_semaphores(const Config *conf) {
     arg.val = conf->nof_wk_seats[STAT_CASSA];
     if (semctl(sem_id, SEM_POSTAZIONI_CASSA, SETVAL, arg) == -1) return -1;
 
-    // 4. Tavoli mensa
+    // 5. Tavoli mensa
     arg.val = conf->nof_table_seats;
     if (semctl(sem_id, SEM_TAVOLI, SETVAL, arg) == -1) return -1;
 
@@ -114,7 +125,6 @@ int init_message_queues(int msg_queue_ids[NUM_STATIONS]) {
     return 0;
 }
 
-// Handler per risvegliare le chiamate bloccanti su interruzione (EINTR)
 static void term_handler(int signum) {
     (void)signum;
 }
@@ -137,7 +147,15 @@ void attendi_nanosecondi(long nanosecs) {
     }
 }
 
-// Operazione P (Wait): decrementa e blocca se <= 0
+void simula_servizio(int tempo_medio_sec, int variazione_percentuale, long n_nano_secs) {
+    if (tempo_medio_sec <= 0) return;
+    int delta_percentuale = (rand() % (2 * variazione_percentuale + 1)) - variazione_percentuale;
+    double fattore = 1.0 + (delta_percentuale / 100.0);
+    double minuti_virtuali = tempo_medio_sec * fattore;
+    long totale_nanosecs = (long)(minuti_virtuali * n_nano_secs);
+    attendi_nanosecondi(totale_nanosecs);
+}
+
 int sem_p(int sem_id, int sem_num) {
     struct sembuf op;
     op.sem_num = sem_num;
@@ -146,7 +164,6 @@ int sem_p(int sem_id, int sem_num) {
     return semop(sem_id, &op, 1);
 }
 
-// Operazione V (Signal): incrementa e sblocca
 int sem_v(int sem_id, int sem_num) {
     struct sembuf op;
     op.sem_num = sem_num;
@@ -155,11 +172,18 @@ int sem_v(int sem_id, int sem_num) {
     return semop(sem_id, &op, 1);
 }
 
-// Attende passivamente che il semaforo raggiunga il valore zero
+int sem_add(int sem_id, int sem_num, int val) {
+    struct sembuf op;
+    op.sem_num = sem_num;
+    op.sem_op = val;
+    op.sem_flg = 0;
+    return semop(sem_id, &op, 1);
+}
+
 int sem_wait_zero(int sem_id, int sem_num) {
     struct sembuf op;
     op.sem_num = sem_num;
-    op.sem_op = 0; // Wait-for-zero
+    op.sem_op = 0;
     op.sem_flg = 0;
     return semop(sem_id, &op, 1);
 }

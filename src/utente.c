@@ -20,13 +20,17 @@ static void simula_consumo_pasto(int num_piatti, long n_nano_secs) {
     }
 }
 
-// Inoltra un ordine a una stazione e attende la risposta selettiva
-static int ordina_a_stazione(int msg_qid, int piatto_scelto, pid_t my_pid) {
+// Inoltra un ordine a una stazione, cronometra l'attesa e registra le metriche in SHM
+static int ordina_a_stazione(int msg_qid, int piatto_scelto, pid_t my_pid,
+                             StationType staz, SharedData *shm_ptr, int sem_id) {
     OrderMessage msg;
     memset(&msg, 0, sizeof(msg));
-    msg.mtype = 1;              // Coda generica della stazione
+    msg.mtype = 1;               // Coda generica della stazione
     msg.sender_pid = my_pid;
     msg.dish_choice = piatto_scelto;
+
+    struct timespec t_start, t_end;
+    clock_gettime(CLOCK_MONOTONIC, &t_start);
 
     if (msgsnd(msg_qid, &msg, sizeof(OrderMessage) - sizeof(long), 0) == -1) {
         return -1;
@@ -36,6 +40,20 @@ static int ordina_a_stazione(int msg_qid, int piatto_scelto, pid_t my_pid) {
     if (msgrcv(msg_qid, &msg, sizeof(OrderMessage) - sizeof(long), my_pid, 0) == -1) {
         return -1;
     }
+
+    clock_gettime(CLOCK_MONOTONIC, &t_end);
+
+    // Calcolo tempo di attesa effettivo in secondi (con precisione ai nanosecondi)
+    double elapsed = (double)(t_end.tv_sec - t_start.tv_sec) +
+                     (double)(t_end.tv_nsec - t_start.tv_nsec) / 1e9;
+
+    // Aggiornamento statistiche in SHM
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->tempo_attesa_oggi[staz] += elapsed;
+    shm_ptr->tempo_attesa_tot[staz] += elapsed;
+    shm_ptr->visite_stazione_oggi[staz]++;
+    shm_ptr->visite_stazione_tot[staz]++;
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
     return msg.status; // 0 se ottenuto, -1 se esaurito
 }
@@ -49,6 +67,7 @@ int main(int argc, char *argv[]) {
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = sigterm_handler;
     sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
     srand(getpid() ^ time(NULL));
@@ -57,24 +76,24 @@ int main(int argc, char *argv[]) {
     // 1. Aggancio Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
-    if (shm_id == -1) { 
-        perror("[UTENTE] shmget"); 
-        exit(EXIT_FAILURE); 
+    if (shm_id == -1) {
+        perror("[UTENTE] shmget");
+        exit(EXIT_FAILURE);
     }
 
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
-
-    if (shm_ptr == (void *)-1) { 
-        perror("[UTENTE] shmat"); 
-        exit(EXIT_FAILURE); 
+    if (shm_ptr == (void *)-1) {
+        perror("[UTENTE] shmat");
+        exit(EXIT_FAILURE);
     }
 
     // 2. Recupero Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
-    if (sem_id == -1) { 
-        perror("[UTENTE] semget"); 
-        shmdt(shm_ptr); exit(EXIT_FAILURE); 
+    if (sem_id == -1) {
+        perror("[UTENTE] semget");
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
     }
 
     // 3. Recupero Code Messaggi per le 4 stazioni
@@ -82,7 +101,11 @@ int main(int argc, char *argv[]) {
     for (int i = 0; i < NUM_STATIONS; i++) {
         key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + i);
         msg_q[i] = msgget(msg_key, 0600);
-        if (msg_q[i] == -1) { perror("[UTENTE] msgget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
+        if (msg_q[i] == -1) {
+            perror("[UTENTE] msgget");
+            shmdt(shm_ptr);
+            exit(EXIT_FAILURE);
+        }
     }
 
     // 4. Barriera di sincronizzazione iniziale
@@ -95,12 +118,12 @@ int main(int argc, char *argv[]) {
     while (shm_ptr->simulazione_attiva) {
         int giorno_attuale = shm_ptr->giorno_corrente;
 
-        // Esegue il giro mensa una sola volta al giorno
+        // Se l'utente ha già effettuato o tentato il pasto per questa giornata, attende il giorno successivo
         if (giorno_attuale == ultimo_giorno_servito) {
             if (!shm_ptr->simulazione_attiva) {
-                break; // Se la simulazione è finita, esce dal while
+                break;
             }
-            struct timespec poll_time = {0, 10000000L};
+            struct timespec poll_time = {0, 10000000L}; // 10ms
             nanosleep(&poll_time, NULL);
             continue;
         }
@@ -112,72 +135,107 @@ int main(int argc, char *argv[]) {
         int num_portate = 0;
 
         // --- STAZIONE PRIMI ---
-        int scelta_p = rand() % 2;
-        if (ordina_a_stazione(msg_q[STAT_PRIMI], scelta_p, my_pid) == 0) {
+        int n_primi = shm_ptr->menu.num_primi > 0 ? shm_ptr->menu.num_primi : 2;
+        int scelta_p = rand() % n_primi;
+
+        // Mappa su indice porzioni (0 o 1) se disponibile
+        if (ordina_a_stazione(msg_q[STAT_PRIMI], scelta_p % 2, my_pid, STAT_PRIMI, shm_ptr, sem_id) == 0) {
             ha_primo = 1;
         } else {
-            // Piatto esaurito: prova l'alternativa (1 - scelta)
-            if (ordina_a_stazione(msg_q[STAT_PRIMI], 1 - scelta_p, my_pid) == 0) {
+            // Piatto esaurito: tenta l'altra alternativa
+            if (ordina_a_stazione(msg_q[STAT_PRIMI], 1 - (scelta_p % 2), my_pid, STAT_PRIMI, shm_ptr, sem_id) == 0) {
                 ha_primo = 1;
             }
         }
-        if (ha_primo) { 
-            conto_totale += 4.50; 
-            num_portate++; 
+        if (ha_primo) {
+            conto_totale += 4.50;
+            num_portate++;
         }
 
         // --- STAZIONE SECONDI ---
-        int scelta_s = rand() % 2;
-        if (ordina_a_stazione(msg_q[STAT_SECONDI], scelta_s, my_pid) == 0) {
+        int n_secondi = shm_ptr->menu.num_secondi > 0 ? shm_ptr->menu.num_secondi : 2;
+        int scelta_s = rand() % n_secondi;
+
+        if (ordina_a_stazione(msg_q[STAT_SECONDI], scelta_s % 2, my_pid, STAT_SECONDI, shm_ptr, sem_id) == 0) {
             ha_secondo = 1;
         } else {
-            if (ordina_a_stazione(msg_q[STAT_SECONDI], 1 - scelta_s, my_pid) == 0) {
+            if (ordina_a_stazione(msg_q[STAT_SECONDI], 1 - (scelta_s % 2), my_pid, STAT_SECONDI, shm_ptr, sem_id) == 0) {
                 ha_secondo = 1;
             }
         }
-        if (ha_secondo) { conto_totale += 5.50; num_portate++; }
+        if (ha_secondo) {
+            conto_totale += 5.50;
+            num_portate++;
+        }
 
         // Se entrambi i tipi di piatto sono terminati, rinuncia ed esce per oggi
         if (!ha_primo && !ha_secondo) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->utenti_non_serviti_oggi++;
             shm_ptr->utenti_non_serviti_tot++;
+            ultimo_giorno_servito = shm_ptr->giorno_corrente;
             sem_v(sem_id, SEM_MUTEX_SHM);
-            ultimo_giorno_servito = giorno_attuale;
             continue;
         }
 
         // --- STAZIONE CAFFÈ (50% probabilità) ---
         if (rand() % 2 == 1) {
-            if (ordina_a_stazione(msg_q[STAT_COFFEE], rand() % 4, my_pid) == 0) {
+            int n_caffe = shm_ptr->menu.num_caffe > 0 ? shm_ptr->menu.num_caffe : 4;
+            int scelta_c = rand() % n_caffe;
+            if (ordina_a_stazione(msg_q[STAT_COFFEE], scelta_c, my_pid, STAT_COFFEE, shm_ptr, sem_id) == 0) {
                 ha_caffe = 1;
                 conto_totale += 1.20;
                 num_portate++;
             }
         }
 
-        // --- STAZIONE CASSA ---
+        // --- CONTROLLO FINE GIORNATA (Sezione 5.5 del PDF) ---
+        // Se la giornata si è conclusa mentre l'utente sceglieva o faceva la fila, rinuncia
+        if (shm_ptr->giorno_corrente != giorno_attuale) {
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            shm_ptr->utenti_non_serviti_oggi++;
+            shm_ptr->utenti_non_serviti_tot++;
+            ultimo_giorno_servito = shm_ptr->giorno_corrente;
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            continue;
+        }
+
+        // --- STAZIONE CASSA (con misurazione attesa) ---
         OrderMessage cassa_msg;
         memset(&cassa_msg, 0, sizeof(cassa_msg));
         cassa_msg.mtype = 1;
         cassa_msg.sender_pid = my_pid;
         cassa_msg.importo = conto_totale;
+
+        struct timespec t_cassa_start, t_cassa_end;
+        clock_gettime(CLOCK_MONOTONIC, &t_cassa_start);
+
         msgsnd(msg_q[STAT_CASSA], &cassa_msg, sizeof(OrderMessage) - sizeof(long), 0);
         msgrcv(msg_q[STAT_CASSA], &cassa_msg, sizeof(OrderMessage) - sizeof(long), my_pid, 0);
 
-        // --- REFEZIONE (TAVOLI) ---
-        // Attesa passiva gestita dal kernel finché non c'è un posto libero
-        sem_p(sem_id, SEM_TAVOLI);
-        simula_consumo_pasto(num_portate, 5000000L); // Consumo pasto
-        sem_v(sem_id, SEM_TAVOLI); // Libera il tavolo
+        clock_gettime(CLOCK_MONOTONIC, &t_cassa_end);
 
-        // Aggiorna statistiche utenti serviti
+        double elapsed_cassa = (double)(t_cassa_end.tv_sec - t_cassa_start.tv_sec) +
+                               (double)(t_cassa_end.tv_nsec - t_cassa_start.tv_nsec) / 1e9;
+
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        shm_ptr->tempo_attesa_oggi[STAT_CASSA] += elapsed_cassa;
+        shm_ptr->tempo_attesa_tot[STAT_CASSA] += elapsed_cassa;
+        shm_ptr->visite_stazione_oggi[STAT_CASSA]++;
+        shm_ptr->visite_stazione_tot[STAT_CASSA]++;
+        sem_v(sem_id, SEM_MUTEX_SHM);
+
+        // --- REFEZIONE (TAVOLI) ---
+        sem_p(sem_id, SEM_TAVOLI);
+        simula_consumo_pasto(num_portate, 5000000L);
+        sem_v(sem_id, SEM_TAVOLI);
+
+        // Aggiorna statistiche utenti serviti in mutua esclusione
         sem_p(sem_id, SEM_MUTEX_SHM);
         shm_ptr->utenti_serviti_oggi++;
         shm_ptr->utenti_serviti_tot++;
+        ultimo_giorno_servito = shm_ptr->giorno_corrente;
         sem_v(sem_id, SEM_MUTEX_SHM);
-
-        ultimo_giorno_servito = giorno_attuale;
     }
 
     shmdt(shm_ptr);

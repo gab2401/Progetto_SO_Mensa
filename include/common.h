@@ -24,6 +24,9 @@
 #define FTOK_PROJ_SEM 20
 #define FTOK_PROJ_MSG_BASE 30 // offset per code stazioni
 
+#define MAX_DISH_NAME 64
+#define MAX_DISHES_PER_TYPE 4
+
 // Union richiesta esplicitamente su Linux per semctl()
 #if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
 /* union semun e' gia' definita */
@@ -57,6 +60,23 @@ enum {
     NUM_SEMAPHORES
 };
 
+// Struttura del singolo piatto/bevanda
+typedef struct {
+    char nome[MAX_DISH_NAME];
+} Piatto;
+
+// Struttura del menu caricato da menu.txt
+typedef struct {
+    Piatto primi[MAX_DISHES_PER_TYPE];
+    int num_primi;
+    Piatto secondi[MAX_DISHES_PER_TYPE];
+    int num_secondi;
+    Piatto dolci[MAX_DISHES_PER_TYPE];
+    int num_dolci;
+    Piatto caffe[MAX_DISHES_PER_TYPE];
+    int num_caffe;
+} Menu;
+
 // Configurazione letta da file
 typedef struct {
     int sim_duration;
@@ -82,11 +102,14 @@ typedef struct {
     int simulazione_attiva;     // 1 attiva, 0 stop
     int giorno_corrente;        // Giorno in corso
     int minuto_corrente;        // Minuto virtuale del giorno corrente (per refill ogni 10 min)
-    
+
+    // Menu caricato all'avvio
+    Menu menu;
+
     // Piatti disponibili (2 tipologie per primi e secondi)
     int porzioni_primi[2];
     int porzioni_secondi[2];
-    
+
     // Contatori per la giornata corrente
     int utenti_serviti_oggi;
     int utenti_non_serviti_oggi;
@@ -94,7 +117,11 @@ typedef struct {
     int pause_effettuate_oggi;
     double ricavo_oggi;
     int operatori_attivi_oggi;
-    
+
+    // Tempi di attesa giornalieri (in secondi reali)
+    double tempo_attesa_oggi[NUM_STATIONS];
+    int visite_stazione_oggi[NUM_STATIONS];
+
     // Statistiche complessive
     int utenti_serviti_tot;
     int utenti_non_serviti_tot;
@@ -102,7 +129,11 @@ typedef struct {
     int piatti_avanzati_tot[NUM_STATIONS];
     int pause_totali;
     double ricavo_totale;
-    
+
+    // Tempi di attesa complessivi dell'intera simulazione
+    double tempo_attesa_tot[NUM_STATIONS];
+    int visite_stazione_tot[NUM_STATIONS];
+
     // Controllo terminazione
     int utenti_in_coda_a_fine_giorno;
     int motivo_terminazione;    // 0: timeout, 1: overload

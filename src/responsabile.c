@@ -68,7 +68,6 @@ pid_t avvia_processo(const char *bin_path, char *const args[]) {
     }
     if (pid == 0) {
         execve(bin_path, args, NULL);
-        // Se execve fallisce, termina immediatamente il processo duplicato
         perror("Errore execve");
         _exit(EXIT_FAILURE);
     }
@@ -109,6 +108,21 @@ int main(int argc, char *argv[]) {
 
     if (init_message_queues(msg_queue_id) == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
 
+    // Caricamento del file di menu nella struct SHM
+    if (carica_menu("config/menu.txt", &shm_ptr->menu) == -1) {
+        fprintf(stderr, "[RESPONSABILE] Attenzione: impossibile leggere config/menu.txt\n");
+    } else {
+        printf("[RESPONSABILE] Menu caricato: %d primi, %d secondi, %d dolci, %d caffe'.\n",
+               shm_ptr->menu.num_primi, shm_ptr->menu.num_secondi,
+               shm_ptr->menu.num_dolci, shm_ptr->menu.num_caffe);
+    }
+
+    // Inizializzazione tempi cumulativi complessivi in SHM
+    for (int s = 0; s < NUM_STATIONS; s++) {
+        shm_ptr->tempo_attesa_tot[s] = 0.0;
+        shm_ptr->visite_stazione_tot[s] = 0;
+    }
+
     // Allocazione array dei PID
     int totale_figli = conf.nof_workers + conf.nof_users;
     child_pids = malloc(sizeof(pid_t) * totale_figli);
@@ -128,14 +142,14 @@ int main(int argc, char *argv[]) {
     if (pid_cassa == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
     child_pids[num_children_spawned++] = pid_cassa;
 
-    // 2. Avvio Operatori (garantendo almeno 1 operatore per stazione primi, secondi, caffe')
+    // 2. Avvio Operatori (almeno 1 per stazione)
     int operatori_da_creare = conf.nof_workers - 1;
     for (int i = 0; i < operatori_da_creare; i++) {
         int staz_id;
         if (i == 0) staz_id = STAT_PRIMI;
         else if (i == 1) staz_id = STAT_SECONDI;
         else if (i == 2) staz_id = STAT_COFFEE;
-        else staz_id = (i % 3); // Distribuzione dei rimanenti tra le stazioni
+        else staz_id = (i % 3);
 
         char staz_arg[16];
         snprintf(staz_arg, sizeof(staz_arg), "%d", staz_id);
@@ -165,13 +179,26 @@ int main(int argc, char *argv[]) {
     // CICLO SIMULAZIONE (GIORNI E MINUTI)
     // -------------------------------------------------------------
     const int MINUTI_PER_GIORNO = 60;
+    int giorni_effettivi_svolti = 0;
+    const char *causa_terminazione = "TIMEOUT (Raggiunta durata massima SIM_DURATION)";
+    const char *staz_nomi[NUM_STATIONS] = {"Primi", "Secondi", "Dolce-Caffe'", "Cassa"};
 
     for (int g = 1; g <= conf.sim_duration && shm_ptr->simulazione_attiva; g++) {
+        giorni_effettivi_svolti = g;
+
         sem_p(sem_id, SEM_MUTEX_SHM);
         shm_ptr->giorno_corrente = g;
         shm_ptr->utenti_serviti_oggi = 0;
         shm_ptr->utenti_non_serviti_oggi = 0;
         shm_ptr->ricavo_oggi = 0.0;
+        shm_ptr->pause_effettuate_oggi = 0;
+        shm_ptr->operatori_attivi_oggi = 0;
+
+        for (int s = 0; s < NUM_STATIONS; s++) {
+            shm_ptr->piatti_distribuiti_oggi[s] = 0;
+            shm_ptr->tempo_attesa_oggi[s] = 0.0;
+            shm_ptr->visite_stazione_oggi[s] = 0;
+        }
         sem_v(sem_id, SEM_MUTEX_SHM);
 
         printf("\n=========================================\n");
@@ -184,7 +211,7 @@ int main(int argc, char *argv[]) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->minuto_corrente = m;
 
-            // Refill ogni 10 minuti
+            // Refill periodico ogni 10 minuti
             if (m % 10 == 0) {
                 for (int p = 0; p < 2; p++) {
                     if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
@@ -197,29 +224,101 @@ int main(int argc, char *argv[]) {
             sem_v(sem_id, SEM_MUTEX_SHM);
         }
 
-        // Stampa statistiche di fine giornata
+        // Breve attesa per consentire ai processi ancora in transito di registrarsi
+        struct timespec drain_time = {0, 50000000L}; // 50ms
+        nanosleep(&drain_time, NULL);
+
+        // --- REPORT FINE GIORNATA (Sezione 5.1 del PDF) ---
         sem_p(sem_id, SEM_MUTEX_SHM);
         printf("\n--- Report Fine Giorno %d ---\n", g);
-        printf("Utenti serviti oggi: %d\n", shm_ptr->utenti_serviti_oggi);
-        printf("Utenti non serviti oggi: %d\n", shm_ptr->utenti_non_serviti_oggi);
-        printf("Incasso giornaliero: %.2f EUR\n", shm_ptr->ricavo_oggi);
-        printf("Scorte residue primi: [%d, %d] | secondi: [%d, %d]\n",
+        printf("Utenti serviti oggi:        %d\n", shm_ptr->utenti_serviti_oggi);
+        printf("Utenti non serviti oggi:    %d\n", shm_ptr->utenti_non_serviti_oggi);
+        printf("Incasso giornaliero:        %.2f EUR\n", shm_ptr->ricavo_oggi);
+        printf("Operatori attivi oggi:      %d\n", shm_ptr->operatori_attivi_oggi);
+        printf("Pause effettuate oggi:      %d\n", shm_ptr->pause_effettuate_oggi);
+        printf("Piatti distribuiti oggi:    Primi: %d | Secondi: %d | Dolce-Caffe': %d\n",
+               shm_ptr->piatti_distribuiti_oggi[STAT_PRIMI],
+               shm_ptr->piatti_distribuiti_oggi[STAT_SECONDI],
+               shm_ptr->piatti_distribuiti_oggi[STAT_COFFEE]);
+        printf("Scorte residue:             Primi: [%d, %d] | Secondi: [%d, %d]\n",
                shm_ptr->porzioni_primi[0], shm_ptr->porzioni_primi[1],
                shm_ptr->porzioni_secondi[0], shm_ptr->porzioni_secondi[1]);
+
+        // Tempi medi di attesa della giornata
+        printf("Tempi medi di attesa oggi:\n");
+        double somma_tempi_oggi = 0.0;
+        int somma_visite_oggi = 0;
+        for (int s = 0; s < NUM_STATIONS; s++) {
+            double media_staz = (shm_ptr->visite_stazione_oggi[s] > 0) ?
+                (shm_ptr->tempo_attesa_oggi[s] / shm_ptr->visite_stazione_oggi[s]) : 0.0;
+            printf("  - %-14s: %.4f s (%d richieste)\n", staz_nomi[s], media_staz, shm_ptr->visite_stazione_oggi[s]);
+            somma_tempi_oggi += shm_ptr->tempo_attesa_oggi[s];
+            somma_visite_oggi += shm_ptr->visite_stazione_oggi[s];
+        }
+        double media_complessiva_oggi = (somma_visite_oggi > 0) ?
+            (somma_tempi_oggi / somma_visite_oggi) : 0.0;
+        printf("  -> Media complessiva oggi: %.4f s\n", media_complessiva_oggi);
+
+        // Verifica condizione di terminazione OVERLOAD (Sezione 5.6 del PDF)
+        if (conf.overload_threshold > 0 &&
+            shm_ptr->utenti_non_serviti_oggi > conf.overload_threshold) {
+            causa_terminazione = "OVERLOAD (Utenti non serviti a fine giornata > soglia)";
+            shm_ptr->simulazione_attiva = 0;
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            printf("\n[ALERT] Superata la soglia di OVERLOAD (%d > %d). Arresto simulazione.\n",
+                   shm_ptr->utenti_non_serviti_oggi, conf.overload_threshold);
+            break;
+        }
         sem_v(sem_id, SEM_MUTEX_SHM);
     }
 
-    // Segnalazione fine simulazione
+    // Segnalazione fine simulazione a tutti i processi
     sem_p(sem_id, SEM_MUTEX_SHM);
     shm_ptr->simulazione_attiva = 0;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
-    printf("\n=========================================\n");
-    printf("         FINE SIMULAZIONE                \n");
-    printf("Totale utenti serviti: %d\n", shm_ptr->utenti_serviti_tot);
-    printf("Totale utenti non serviti: %d\n", shm_ptr->utenti_non_serviti_tot);
-    printf("Incasso totale complessivo: %.2f EUR\n", shm_ptr->ricavo_totale);
-    printf("=========================================\n");
+    if (giorni_effettivi_svolti == 0) giorni_effettivi_svolti = 1;
+
+    // --- REPORT FINALE COMPLESSIVO (Sezione 5.1 e 5.6 del PDF) ---
+    printf("\n=======================================================\n");
+    printf("                  FINE SIMULAZIONE                     \n");
+    printf("=======================================================\n");
+    printf("Causa di terminazione:      %s\n", causa_terminazione);
+    printf("Giorni simulati effettivi:  %d su %d\n", giorni_effettivi_svolti, conf.sim_duration);
+    printf("Totale utenti serviti:      %d (Media: %.1f al giorno)\n",
+           shm_ptr->utenti_serviti_tot,
+           (double)shm_ptr->utenti_serviti_tot / giorni_effettivi_svolti);
+    printf("Totale utenti non serviti:  %d (Media: %.1f al giorno)\n",
+           shm_ptr->utenti_non_serviti_tot,
+           (double)shm_ptr->utenti_non_serviti_tot / giorni_effettivi_svolti);
+    printf("Incasso totale complessivo: %.2f EUR (Media: %.2f EUR al giorno)\n",
+           shm_ptr->ricavo_totale,
+           shm_ptr->ricavo_totale / giorni_effettivi_svolti);
+    printf("Totale pause effettuate:    %d (Media: %.1f al giorno)\n",
+           shm_ptr->pause_totali,
+           (double)shm_ptr->pause_totali / giorni_effettivi_svolti);
+    printf("Piatti totali distribuiti:  Primi: %d (media %.1f) | Secondi: %d (media %.1f) | Dolce-Caffe': %d (media %.1f)\n",
+           shm_ptr->piatti_distribuiti_tot[STAT_PRIMI],
+           (double)shm_ptr->piatti_distribuiti_tot[STAT_PRIMI] / giorni_effettivi_svolti,
+           shm_ptr->piatti_distribuiti_tot[STAT_SECONDI],
+           (double)shm_ptr->piatti_distribuiti_tot[STAT_SECONDI] / giorni_effettivi_svolti,
+           shm_ptr->piatti_distribuiti_tot[STAT_COFFEE],
+           (double)shm_ptr->piatti_distribuiti_tot[STAT_COFFEE] / giorni_effettivi_svolti);
+
+    printf("\nTempi medi di attesa complessivi (intera simulazione):\n");
+    double somma_tempi_tot = 0.0;
+    int somma_visite_tot = 0;
+    for (int s = 0; s < NUM_STATIONS; s++) {
+        double media_tot_staz = (shm_ptr->visite_stazione_tot[s] > 0) ?
+            (shm_ptr->tempo_attesa_tot[s] / shm_ptr->visite_stazione_tot[s]) : 0.0;
+        printf("  - %-14s: %.4f s (%d richieste)\n", staz_nomi[s], media_tot_staz, shm_ptr->visite_stazione_tot[s]);
+        somma_tempi_tot += shm_ptr->tempo_attesa_tot[s];
+        somma_visite_tot += shm_ptr->visite_stazione_tot[s];
+    }
+    double media_totale_globale = (somma_visite_tot > 0) ?
+        (somma_tempi_tot / somma_visite_tot) : 0.0;
+    printf("  -> Media complessiva simulazione: %.4f s\n", media_totale_globale);
+    printf("=======================================================\n");
 
     // Pulizia e attesa di tutti i processi figli
     cleanup_resources();

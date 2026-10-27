@@ -105,6 +105,10 @@ int main(int argc, char *argv[]) {
             giorno_locale = shm_ptr->giorno_corrente;
             pause_fatte_oggi = 0;
             clienti_serviti_da_ultima_pausa = 0;
+
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            shm_ptr->operatori_attivi_oggi++;
+            sem_v(sem_id, SEM_MUTEX_SHM);
         }
 
         ssize_t res = msgrcv(msg_q_id, &msg, sizeof(OrderMessage) - sizeof(long), 1, 0);

@@ -45,6 +45,8 @@ static void simula_tempo_cassa(int tempo_cassa, long n_nano_secs) {
 }
 
 int main(int argc, char *argv[]) {
+    (void)argc;
+    (void)argv;
     srand((unsigned int)(time(NULL) ^ (getpid() << 16)));
 
     struct sigaction sa;
@@ -103,6 +105,10 @@ int main(int argc, char *argv[]) {
             sem_v(sem_id, SEM_MUTEX_SHM);
         }
 
+        // Verifica blocco cassa (communication_disorder) prima di servire
+        sem_p(sem_id, SEM_CASSA_BLOCCO);
+        sem_v(sem_id, SEM_CASSA_BLOCCO);
+
         OrderMessage req;
         ssize_t res = msgrcv(msg_q_cassa, &req, sizeof(OrderMessage) - sizeof(long), 1, 0);
         if (res == -1) {
@@ -116,8 +122,15 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Il conto totale è già stato aggregato dall'utente prima dell'invio
+        // Se communication_disorder scatta durante l'elaborazione del pagamento
+        sem_p(sem_id, SEM_CASSA_BLOCCO);
+        sem_v(sem_id, SEM_CASSA_BLOCCO);
+
+        // Calcolo importo con eventuale sconto ticket (30/30)
         double importo = req.importo;
+        if (req.has_ticket) {
+            importo = importo * 0.80; // 20% di sconto per utenti muniti di ticket
+        }
 
         // Simulazione erogazione servizio cassa (2 sec medi simulati)
         simula_tempo_cassa(2, 5000000L);
@@ -135,6 +148,7 @@ int main(int argc, char *argv[]) {
         resp.sender_pid = getpid();
         resp.status = 0;
         resp.importo = importo;
+        resp.has_ticket = req.has_ticket;
 
         if (msgsnd(msg_q_cassa, &resp, sizeof(OrderMessage) - sizeof(long), 0) == -1) {
             if (errno != EIDRM && errno != EINVAL) {

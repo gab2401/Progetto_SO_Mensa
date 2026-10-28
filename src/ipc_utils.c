@@ -74,6 +74,13 @@ int init_semaphores(const Config *conf) {
     arg.val = conf->nof_table_seats;
     if (semctl(sem_id, SEM_TAVOLI, SETVAL, arg) == -1) return -1;
 
+    // 5. Nuovi semafori versione 30/30
+    arg.val = 1; // 1 = cassa attiva e operativa
+    if (semctl(sem_id, SEM_CASSA_BLOCCO, SETVAL, arg) == -1) return -1;
+
+    arg.val = 1; // 1 = postazione validazione ticket libera
+    if (semctl(sem_id, SEM_LETTORE_TICKET, SETVAL, arg) == -1) return -1;
+
     return sem_id;
 }
 

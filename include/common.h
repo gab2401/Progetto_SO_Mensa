@@ -26,6 +26,7 @@
 
 #define MAX_DISH_NAME 64
 #define MAX_DISHES_PER_TYPE 4
+#define MAX_GROUPS 128        // Numero massimo di gruppi gestibili in simulazione
 
 // Union richiesta esplicitamente su Linux per semctl()
 #if defined(__GNU_LIBRARY__) && !defined(_SEM_SEMUN_UNDEFINED)
@@ -57,7 +58,12 @@ enum {
     SEM_POSTAZIONI_CASSA,  // Postazioni disponibili cassa
     SEM_TAVOLI,            // Posti a tavola disponibili (NOF_TABLE_SEATS)
     SEM_BARRIERA_START,    // Barriera per avvio sincrono di tutti i processi
-    NUM_SEMAPHORES
+
+    // Nuovi semafori (30/30)
+    SEM_CASSA_BLOCCO,      // Mutex per blocco cassa da communication_disorder (init a 1)
+    SEM_LETTORE_TICKET,    // Postazione per validazione ticket (init a 1)
+
+    NUM_SEMAPHORES         // DEVE ESSERE IN FONDO per avere la dimensione corretta del set
 };
 
 // Struttura del singolo piatto/bevanda
@@ -95,13 +101,26 @@ typedef struct {
     double price_secondi;
     double price_coffee;
     int avg_srvc[NUM_STATIONS];
+
+    // Parametri versione 30/30
+    int stop_duration;
+    int max_users_per_group;
+    int avg_refill_time;
+    double ticket_discount;
 } Config;
+
+// Struttura per la sincronizzazione del gruppo (30/30)
+typedef struct {
+    int total_members;          // Numero totale componenti del gruppo
+    int ready_count;            // Quanti hanno preso tutti i piatti scelti
+    int barrier_flag;           // 1 quando tutti i componenti sono pronti ad andare alla cassa
+} UserGroup;
 
 // Struttura in Shared Memory per lo stato globale e le statistiche
 typedef struct {
     int simulazione_attiva;     // 1 attiva, 0 stop
     int giorno_corrente;        // Giorno in corso
-    int minuto_corrente;        // Minuto virtuale del giorno corrente (per refill ogni 10 min)
+    int minuto_corrente;        // Minuto virtuale del giorno corrente
 
     // Menu caricato all'avvio
     Menu menu;
@@ -137,9 +156,14 @@ typedef struct {
     // Controllo terminazione
     int utenti_in_coda_a_fine_giorno;
     int motivo_terminazione;    // 0: timeout, 1: overload
-    
+
     // Operatori attualmente presenti e attivi alla stazione (per evitare stazioni vuote)
     int operatori_in_servizio[NUM_STATIONS];
+
+    // Supporto per gruppi e utenti dinamici (30/30)
+    int num_gruppi;
+    UserGroup gruppi[MAX_GROUPS];
+    int utenti_totali_generati;
 } SharedData;
 
 // Messaggio per code IPC (scambio tra Utente e Operatore/Cassiere)
@@ -149,6 +173,7 @@ typedef struct {
     int dish_choice;     // 0 o 1 (per primi/secondi), o tipo caffe'
     double importo;      // Usato per la cassa
     int status;          // 0: successo, -1: piatto esaurito
+    int has_ticket;      // 1: utente con ticket (sconto in cassa), 0: standard
 } OrderMessage;
 
 #endif

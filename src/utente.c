@@ -3,13 +3,12 @@
 
 static void sigterm_handler(int signum) {
     (void)signum;
-    _exit(EXIT_SUCCESS); // Termina immediatamente il processo figlio senza passare per pulizie complesse
+    _exit(EXIT_SUCCESS);
 }
 
 // Funzione helper per simulare il tempo di consumo pasti tramite nanosleep
 static void simula_consumo_pasto(int num_piatti, long n_nano_secs) {
     if (num_piatti <= 0) return;
-    // Tempo proporzionale al numero di portate (es. 2 minuti virtuali a piatto)
     long totale_nanosecs = (long)num_piatti * 2 * n_nano_secs;
 
     struct timespec req, rem;
@@ -43,7 +42,6 @@ static int ordina_a_stazione(int msg_qid, int piatto_scelto, pid_t my_pid,
 
     clock_gettime(CLOCK_MONOTONIC, &t_end);
 
-    // Calcolo tempo di attesa effettivo in secondi (con precisione ai nanosecondi)
     double elapsed = (double)(t_end.tv_sec - t_start.tv_sec) +
                      (double)(t_end.tv_nsec - t_start.tv_nsec) / 1e9;
 
@@ -59,8 +57,16 @@ static int ordina_a_stazione(int msg_qid, int piatto_scelto, pid_t my_pid,
 }
 
 int main(int argc, char *argv[]) {
-    (void)argc;
-    (void)argv;
+    // 0. Determinazione del gruppo (30/30)
+    int group_id = -1;
+    int is_dynamic = 0;
+
+    if (argc > 1) {
+        group_id = atoi(argv[1]);
+    }
+    if (argc > 2) {
+        is_dynamic = atoi(argv[2]); // 1 se creato da aggiungi_utenti
+    }
 
     // Registrazione handler per terminazione pulita
     struct sigaction sa;
@@ -70,7 +76,7 @@ int main(int argc, char *argv[]) {
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
 
-    srand(getpid() ^ time(NULL));
+    srand(getpid() ^ (unsigned int)time(NULL));
     pid_t my_pid = getpid();
 
     // 1. Aggancio Memoria Condivisa
@@ -109,28 +115,37 @@ int main(int argc, char *argv[]) {
     }
 
     // 4. Barriera di sincronizzazione iniziale
-    sem_p(sem_id, SEM_BARRIERA_START);
-    sem_wait_zero(sem_id, SEM_BARRIERA_START);
-
+    if (!is_dynamic) {
+        sem_p(sem_id, SEM_BARRIERA_START);
+        sem_wait_zero(sem_id, SEM_BARRIERA_START);
+    }
     // 5. Ciclo di vita per giorni simulati
     int ultimo_giorno_servito = 0;
+
+    // Profilo utente: 80% possiede il ticket (Sezione 6)
+    int has_ticket = ((rand() % 100) < 80) ? 1 : 0;
 
     while (shm_ptr->simulazione_attiva) {
         int giorno_attuale = shm_ptr->giorno_corrente;
 
-        // Se l'utente ha già effettuato o tentato il pasto per questa giornata, attende il giorno successivo
         if (giorno_attuale == ultimo_giorno_servito) {
-            if (!shm_ptr->simulazione_attiva) {
-                break;
-            }
+            if (!shm_ptr->simulazione_attiva) break;
             struct timespec poll_time = {0, 10000000L}; // 10ms
             nanosleep(&poll_time, NULL);
             continue;
         }
 
+        // --- FILA LETTURA TICKET (30/30) ---
+        // Gli utenti con ticket fanno una coda preliminare di validazione
+        if (has_ticket) {
+            sem_p(sem_id, SEM_LETTORE_TICKET);
+            struct timespec ts_ticket = {0, 2000000L}; // 2ms validazione
+            nanosleep(&ts_ticket, NULL);
+            sem_v(sem_id, SEM_LETTORE_TICKET);
+        }
+
         int ha_primo = 0;
         int ha_secondo = 0;
-        int ha_caffe = 0;
         double conto_totale = 0.0;
         int num_portate = 0;
 
@@ -138,11 +153,9 @@ int main(int argc, char *argv[]) {
         int n_primi = shm_ptr->menu.num_primi > 0 ? shm_ptr->menu.num_primi : 2;
         int scelta_p = rand() % n_primi;
 
-        // Mappa su indice porzioni (0 o 1) se disponibile
         if (ordina_a_stazione(msg_q[STAT_PRIMI], scelta_p % 2, my_pid, STAT_PRIMI, shm_ptr, sem_id) == 0) {
             ha_primo = 1;
         } else {
-            // Piatto esaurito: tenta l'altra alternativa
             if (ordina_a_stazione(msg_q[STAT_PRIMI], 1 - (scelta_p % 2), my_pid, STAT_PRIMI, shm_ptr, sem_id) == 0) {
                 ha_primo = 1;
             }
@@ -168,7 +181,7 @@ int main(int argc, char *argv[]) {
             num_portate++;
         }
 
-        // Se entrambi i tipi di piatto sono terminati, rinuncia ed esce per oggi
+        // Se entrambi i piatti sono esauriti, rinuncia ed esce
         if (!ha_primo && !ha_secondo) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->utenti_non_serviti_oggi++;
@@ -183,14 +196,12 @@ int main(int argc, char *argv[]) {
             int n_caffe = shm_ptr->menu.num_caffe > 0 ? shm_ptr->menu.num_caffe : 4;
             int scelta_c = rand() % n_caffe;
             if (ordina_a_stazione(msg_q[STAT_COFFEE], scelta_c, my_pid, STAT_COFFEE, shm_ptr, sem_id) == 0) {
-                ha_caffe = 1;
                 conto_totale += 1.20;
                 num_portate++;
             }
         }
 
-        // --- CONTROLLO FINE GIORNATA (Sezione 5.5 del PDF) ---
-        // Se la giornata si è conclusa mentre l'utente sceglieva o faceva la fila, rinuncia
+        // Se la giornata si è conclusa durante la scelta, rinuncia
         if (shm_ptr->giorno_corrente != giorno_attuale) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->utenti_non_serviti_oggi++;
@@ -200,12 +211,47 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // --- STAZIONE CASSA (con misurazione attesa) ---
+        // --- SINCRONIZZAZIONE GRUPPO PRIMA DI PAGARE (Sezione 6) ---
+        // Vanno a pagare solo dopo essersi riforniti di tutti i piatti desiderati
+        if (group_id >= 0 && group_id < MAX_GROUPS) {
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            shm_ptr->gruppi[group_id].ready_count++;
+            if (shm_ptr->gruppi[group_id].ready_count >= shm_ptr->gruppi[group_id].total_members) {
+                shm_ptr->gruppi[group_id].barrier_flag = 1; // Tutto il gruppo è pronto
+            }
+            sem_v(sem_id, SEM_MUTEX_SHM);
+
+            // Attesa passiva che tutti i componenti abbiano ritirato i pasti
+            while (shm_ptr->simulazione_attiva) {
+                sem_p(sem_id, SEM_MUTEX_SHM);
+                int gruppo_pronto = shm_ptr->gruppi[group_id].barrier_flag;
+                sem_v(sem_id, SEM_MUTEX_SHM);
+
+                if (gruppo_pronto || shm_ptr->giorno_corrente != giorno_attuale) {
+                    break;
+                }
+                struct timespec ts_sync = {0, 2000000L}; // 2ms polling
+                nanosleep(&ts_sync, NULL);
+            }
+        }
+
+        // Controllo aggiuntivo fine giornata dopo l'attesa del gruppo
+        if (shm_ptr->giorno_corrente != giorno_attuale) {
+            sem_p(sem_id, SEM_MUTEX_SHM);
+            shm_ptr->utenti_non_serviti_oggi++;
+            shm_ptr->utenti_non_serviti_tot++;
+            ultimo_giorno_servito = shm_ptr->giorno_corrente;
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            continue;
+        }
+
+        // --- STAZIONE CASSA (con misurazione attesa e flag ticket) ---
         OrderMessage cassa_msg;
         memset(&cassa_msg, 0, sizeof(cassa_msg));
         cassa_msg.mtype = 1;
         cassa_msg.sender_pid = my_pid;
         cassa_msg.importo = conto_totale;
+        cassa_msg.has_ticket = has_ticket; // Segnala se applicare sconto ticket
 
         struct timespec t_cassa_start, t_cassa_end;
         clock_gettime(CLOCK_MONOTONIC, &t_cassa_start);
@@ -235,6 +281,15 @@ int main(int argc, char *argv[]) {
         shm_ptr->utenti_serviti_oggi++;
         shm_ptr->utenti_serviti_tot++;
         ultimo_giorno_servito = shm_ptr->giorno_corrente;
+
+        // Reset del flag di gruppo se tutti hanno completato
+        if (group_id >= 0 && group_id < MAX_GROUPS) {
+            shm_ptr->gruppi[group_id].ready_count--;
+            if (shm_ptr->gruppi[group_id].ready_count <= 0) {
+                shm_ptr->gruppi[group_id].ready_count = 0;
+                shm_ptr->gruppi[group_id].barrier_flag = 0;
+            }
+        }
         sem_v(sem_id, SEM_MUTEX_SHM);
     }
 

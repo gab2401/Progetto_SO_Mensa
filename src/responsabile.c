@@ -73,6 +73,40 @@ pid_t avvia_processo(const char *bin_path, char *const args[]) {
     }
     return pid;
 }
+// Scrittura statistiche su file CSV
+static void esporta_statistiche_csv(const char *filepath, const SharedData *shm,
+                                   int giorni_svolti, const char *causa) {
+    FILE *fp = fopen(filepath, "w");
+    if (!fp) {
+        perror("[RESPONSABILE] Errore apertura file CSV per statistiche");
+        return;
+    }
+
+    fprintf(fp, "Metrica,Valore\n");
+    fprintf(fp, "Causa_Terminazione,\"%s\"\n", causa);
+    fprintf(fp, "Giorni_Simulati,%d\n", giorni_svolti);
+    fprintf(fp, "Utenti_Serviti_Totali,%d\n", shm->utenti_serviti_tot);
+    fprintf(fp, "Utenti_Non_Serviti_Totali,%d\n", shm->utenti_non_serviti_tot);
+    fprintf(fp, "Media_Utenti_Serviti_Giorno,%.2f\n", (double)shm->utenti_serviti_tot / giorni_svolti);
+    fprintf(fp, "Media_Utenti_Non_Serviti_Giorno,%.2f\n", (double)shm->utenti_non_serviti_tot / giorni_svolti);
+    fprintf(fp, "Ricavo_Totale_EUR,%.2f\n", shm->ricavo_totale);
+    fprintf(fp, "Media_Ricavo_Giorno_EUR,%.2f\n", shm->ricavo_totale / giorni_svolti);
+    fprintf(fp, "Pause_Totali,%d\n", shm->pause_totali);
+    fprintf(fp, "Media_Pause_Giorno,%.2f\n", (double)shm->pause_totali / giorni_svolti);
+    fprintf(fp, "Piatti_Primi_Distribuiti,%d\n", shm->piatti_distribuiti_tot[STAT_PRIMI]);
+    fprintf(fp, "Piatti_Secondi_Distribuiti,%d\n", shm->piatti_distribuiti_tot[STAT_SECONDI]);
+    fprintf(fp, "Piatti_Coffee_Distribuiti,%d\n", shm->piatti_distribuiti_tot[STAT_COFFEE]);
+
+    // Tempi di attesa complessivi
+    for (int s = 0; s < NUM_STATIONS; s++) {
+        double media = (shm->visite_stazione_tot[s] > 0) ?
+            (shm->tempo_attesa_tot[s] / shm->visite_stazione_tot[s]) : 0.0;
+        fprintf(fp, "Tempo_Medio_Attesa_Staz_%d,%.4f\n", s, media);
+    }
+
+    fclose(fp);
+    printf("[RESPONSABILE] Statistiche esportate con successo in '%s'\n", filepath);
+}
 
 int main(int argc, char *argv[]) {
     if (argc < 2) {
@@ -160,13 +194,39 @@ int main(int argc, char *argv[]) {
         child_pids[num_children_spawned++] = pid_op;
     }
 
-    // 3. Avvio Utenti
-    char *utente_args[] = {"utente", NULL};
-    for (int i = 0; i < conf.nof_users; i++) {
-        pid_t pid_ut = avvia_processo("./bin/utente", utente_args);
-        if (pid_ut == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
-        child_pids[num_children_spawned++] = pid_ut;
+
+    // 3. Avvio Utenti suddivisi in gruppi (versione 30/30)
+    srand((unsigned int)time(NULL));
+    int utenti_rimasti = conf.nof_users;
+    int cur_group_id = 0;
+    shm_ptr->utenti_totali_generati = conf.nof_users;
+
+    while (utenti_rimasti > 0 && cur_group_id < MAX_GROUPS) {
+        int max_taglia = (conf.max_users_per_group > 0) ? conf.max_users_per_group : 1;
+        int group_size = (rand() % max_taglia) + 1;
+        if (group_size > utenti_rimasti) {
+            group_size = utenti_rimasti;
+        }
+
+        shm_ptr->gruppi[cur_group_id].total_members = group_size;
+        shm_ptr->gruppi[cur_group_id].ready_count = 0;
+        shm_ptr->gruppi[cur_group_id].barrier_flag = 0;
+
+        char group_arg[16];
+        snprintf(group_arg, sizeof(group_arg), "%d", cur_group_id);
+
+        for (int k = 0; k < group_size; k++) {
+            char *utente_args[] = {"utente", group_arg, NULL};
+            pid_t pid_ut = avvia_processo("./bin/utente", utente_args);
+            if (pid_ut == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
+            child_pids[num_children_spawned++] = pid_ut;
+        }
+
+        utenti_rimasti -= group_size;
+        cur_group_id++;
     }
+    shm_ptr->num_gruppi = cur_group_id;
+    printf("[RESPONSABILE] Creati %d utenti suddivisi in %d gruppi.\n", conf.nof_users, cur_group_id);
 
     printf("[RESPONSABILE] Creati %d processi figli. Attesa sincronizzazione alla barriera...\n",
            num_children_spawned);
@@ -205,14 +265,20 @@ int main(int argc, char *argv[]) {
         printf("         INIZIO GIORNATA %d              \n", g);
         printf("=========================================\n");
 
+        // Calcolo primo intervallo refill: AVG_REFILL_TIME ± 20%
+        int jitter = (conf.avg_refill_time * 20) / 100;
+        if (jitter < 1) jitter = 1;
+        int delta_refill = (conf.avg_refill_time - jitter) + (rand() % (2 * jitter + 1));
+        int prossimo_refill = delta_refill;
+
         for (int m = 1; m <= MINUTI_PER_GIORNO && shm_ptr->simulazione_attiva; m++) {
             attendi_nanosecondi(conf.n_nano_secs);
 
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->minuto_corrente = m;
 
-            // Refill periodico ogni 10 minuti
-            if (m % 10 == 0) {
+            // Refill variabile con intervallo dinamico
+            if (m >= prossimo_refill) {
                 for (int p = 0; p < 2; p++) {
                     if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
                         shm_ptr->porzioni_primi[p] += conf.avg_refill_primi;
@@ -220,6 +286,10 @@ int main(int argc, char *argv[]) {
                         shm_ptr->porzioni_secondi[p] += conf.avg_refill_secondi;
                 }
                 printf("[REFILL] Minuto %d: Ricarica porzioni effettuata.\n", m);
+
+                // Pianifica il prossimo refill
+                delta_refill = (conf.avg_refill_time - jitter) + (rand() % (2 * jitter + 1));
+                prossimo_refill = m + delta_refill;
             }
             sem_v(sem_id, SEM_MUTEX_SHM);
         }
@@ -320,6 +390,8 @@ int main(int argc, char *argv[]) {
     printf("  -> Media complessiva simulazione: %.4f s\n", media_totale_globale);
     printf("=======================================================\n");
 
+    // Esportazione su file CSV
+    esporta_statistiche_csv("statistiche.csv", shm_ptr, giorni_effettivi_svolti, causa_terminazione);
     // Pulizia e attesa di tutti i processi figli
     cleanup_resources();
     return 0;

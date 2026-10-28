@@ -4,8 +4,13 @@ SRC_DIR = src
 BIN_DIR = bin
 OBJ_DIR = obj
 
-# Eseguibili previsti
-TARGETS = $(BIN_DIR)/responsabile $(BIN_DIR)/cassiere $(BIN_DIR)/operatore $(BIN_DIR)/utente
+# Eseguibili previsti per la versione completa (30/30)
+TARGETS = $(BIN_DIR)/responsabile \
+          $(BIN_DIR)/cassiere \
+          $(BIN_DIR)/operatore \
+          $(BIN_DIR)/utente \
+          $(BIN_DIR)/communication_disorder \
+          $(BIN_DIR)/aggiungi_utenti
 
 all: directories $(TARGETS)
 
@@ -18,10 +23,16 @@ $(BIN_DIR)/responsabile: $(OBJ_DIR)/responsabile.o $(OBJ_DIR)/config.o $(OBJ_DIR
 $(BIN_DIR)/operatore: $(OBJ_DIR)/operatore.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
-$(BIN_DIR)/cassiere: $(OBJ_DIR)/cassiere.o $(OBJ_DIR)/ipc_utils.o 
+$(BIN_DIR)/cassiere: $(OBJ_DIR)/cassiere.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(BIN_DIR)/utente: $(OBJ_DIR)/utente.o $(OBJ_DIR)/ipc_utils.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BIN_DIR)/communication_disorder: $(OBJ_DIR)/communication_disorder.o $(OBJ_DIR)/config.o $(OBJ_DIR)/ipc_utils.o
+	$(CC) $(CFLAGS) $^ -o $@
+
+$(BIN_DIR)/aggiungi_utenti: $(OBJ_DIR)/aggiungi_utenti.o $(OBJ_DIR)/config.o $(OBJ_DIR)/ipc_utils.o
 	$(CC) $(CFLAGS) $^ -o $@
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c

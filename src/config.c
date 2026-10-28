@@ -6,6 +6,10 @@ int parse_config(const char *filepath, Config *conf) {
         perror("Errore apertura file di configurazione");
         return -1;
     }
+    conf->stop_duration = 5;
+    conf->max_users_per_group = 4;
+    conf->avg_refill_time = 10;
+    conf->ticket_discount = 0.20;
 
     char line[256];
     char key[128];
@@ -61,6 +65,15 @@ int parse_config(const char *filepath, Config *conf) {
                 conf->avg_srvc[STAT_COFFEE] = atoi(val);
             } else if (strcmp(key, "AVG_SRVC_CASSA") == 0) {
                 conf->avg_srvc[STAT_CASSA] = atoi(val);
+            }
+            else if (strcmp(key, "STOP_DURATION") == 0) {
+                conf->stop_duration = atoi(val);
+            } else if (strcmp(key, "MAX_USERS_PER_GROUP") == 0) {
+                conf->max_users_per_group = atoi(val);
+            } else if (strcmp(key, "AVG_REFILL_TIME") == 0) {
+                conf->avg_refill_time = atoi(val);
+            } else if (strcmp(key, "TICKET_DISCOUNT") == 0) {
+                conf->ticket_discount = atof(val);
             }
         }
     }

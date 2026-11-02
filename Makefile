@@ -4,7 +4,6 @@ SRC_DIR = src
 BIN_DIR = bin
 OBJ_DIR = obj
 
-# Eseguibili previsti per la versione completa (30/30)
 TARGETS = $(BIN_DIR)/responsabile \
           $(BIN_DIR)/cassiere \
           $(BIN_DIR)/operatore \
@@ -41,7 +40,6 @@ $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 clean:
 	rm -rf $(OBJ_DIR) $(BIN_DIR)
 
-# Pulizia di emergenza delle risorse IPC System V create dall'utente corrente
 clean_ipc:
 	@echo "Rimozione code di messaggi..."
 	@ipcs -q | awk '$$2 ~ /^[0-9]+$$/ {print $$2}' | xargs -r ipcrm -q

@@ -1,27 +1,65 @@
-<<<<<<< HEAD
-# Cartelle di output compilazione
-bin/*
-obj/*
-
-# Ignora eseguibili se compilati nella root
-*.out
-
-# File temporanei di backup e dell'editor
-*~
-*.swp
-.DS_Store
-.vscode/
-
-# File di output simulazione (es. log o csv generati a runtime)
-*.csv
-*.log
-=======
-# Ignora tutti gli eseguibili compilati
+# ==============================================================================
+# File di build e artefatti di compilazione C
+# ==============================================================================
+# Directory degli oggetti e dei binari compilati dal Makefile
+obj/
 bin/
 
-# Ignora file oggetto temporanei
+# File oggetto, librerie e debug symbols
 *.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dSYM/
 
-# Ignora file di sistema macOS
+# File di dump per crash e debug
+core
+core.*
+vgcore.*
+
+# ==============================================================================
+# Output di simulazione e file generati a runtime
+# ==============================================================================
+statistiche.csv
+
+# ==============================================================================
+# IDE JetBrains (CLion / IntelliJ IDEA) - per il tuo compagno
+# ==============================================================================
+.idea/
+cmake-build-*/
+*.iws
+*.iml
+*.ipr
+out/
+
+# ==============================================================================
+# Visual Studio Code
+# ==============================================================================
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# ==============================================================================
+# File di sistema operativo e temporanei
+# ==============================================================================
+# macOS
 .DS_Store
->>>>>>> 79838a39189dc0618e810253d47951089e1a33f9
+.AppleDouble
+.LSOverride
+._*
+
+# Linux / Editor temporanei (Vim, Nano, Emacs)
+*~
+*.swp
+*.swo
+.#*
+\#*\#
+
+# Archivi di consegna temporanei (es. per non tracciare tar/zip creati per test)
+*.tar.gz
+*.tgz
+*.zip

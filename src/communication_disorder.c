@@ -1,6 +1,6 @@
-#include "../include/common.h"
-#include "../include/config.h"
-#include "../include/ipc_utils.h"
+#include "common.h"
+#include "config.h"
+#include "ipc_utils.h"
 
 int main(int argc, char *argv[]) {
     const char *conf_path = (argc > 1) ? argv[1] : "config/config_timeout.conf";
@@ -23,23 +23,21 @@ int main(int argc, char *argv[]) {
     }
 
     int durata = (conf.stop_duration > 0) ? conf.stop_duration : 5;
-    printf("[COMMUNICATION DISORDER] Avvio blocco cassa per %d secondi...\n", durata);
+    printf("[COMMUNICATION DISORDER] Avvio blocco cassa per %d secondi virtuali/reali...\n", durata);
 
-    // Blocca il funzionamento della cassa acquisendo il semaforo a 0
-    if (sem_p(sem_id, SEM_CASSA_BLOCCO) == -1) {
+    // Blocco cassa protetto con SEM_UNDO (sicuro contro interruzioni brutali)
+    if (sem_p_undo(sem_id, SEM_CASSA_BLOCCO) == -1) {
         perror("[DISORDER] sem_p su SEM_CASSA_BLOCCO fallita");
         exit(EXIT_FAILURE);
     }
 
-    // Attesa bloccante senza consumo di CPU
     sleep(durata);
 
-    // Rilascia la cassa riportando il semaforo a 1
-    if (sem_v(sem_id, SEM_CASSA_BLOCCO) == -1) {
+    if (sem_v_undo(sem_id, SEM_CASSA_BLOCCO) == -1) {
         perror("[DISORDER] sem_v su SEM_CASSA_BLOCCO fallita");
         exit(EXIT_FAILURE);
     }
 
-    printf("[COMMUNICATION DISORDER] Ripristino completato: la cassa e' nuovamente attiva.\n");
+    printf("[COMMUNICATION DISORDER] Ripristino completato: la cassa e' nuovamente operativa.\n");
     return 0;
 }

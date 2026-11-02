@@ -1,75 +1,27 @@
-#include "../include/common.h"
-#include "../include/ipc_utils.h"
-#include "../include/config.h"
-
-#include <stdio.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <unistd.h>
-#include <errno.h>
-#include <signal.h>
-#include <time.h>
-#include <sys/types.h>
-#include <sys/ipc.h>
-#include <sys/shm.h>
-#include <sys/sem.h>
-#include <sys/msg.h>
-
-static volatile sig_atomic_t keep_running = 1;
-
-static void sig_handler(int sig) {
-    (void)sig;
-    keep_running = 0;
-}
-
-// Simula il tempo di servizio cassa con scostamento percentuale (+-20%)
-static void simula_tempo_cassa(int tempo_cassa, long n_nano_secs) {
-    if (tempo_cassa <= 0) return;
-
-    double fattore = 0.8 + ((double)rand() / RAND_MAX) * 0.4;
-    double tempo_sec = tempo_cassa * fattore;
-
-    long long total_ns = (long long)(tempo_sec * n_nano_secs);
-    if (total_ns < 1000LL) {
-        total_ns = 1000LL;
-    }
-
-    struct timespec req, rem;
-    req.tv_sec = (time_t)(total_ns / 1000000000LL);
-    req.tv_nsec = (long)(total_ns % 1000000000LL);
-
-    while (nanosleep(&req, &rem) == -1 && errno == EINTR) {
-        if (!keep_running) break;
-        req = rem;
-    }
-}
+#include "common.h"
+#include "ipc_utils.h"
 
 int main(int argc, char *argv[]) {
+    setup_term_handler();
     (void)argc;
     (void)argv;
-    srand((unsigned int)(time(NULL) ^ (getpid() << 16)));
 
-    struct sigaction sa;
-    sa.sa_handler = sig_handler;
-    sigemptyset(&sa.sa_mask);
-    sa.sa_flags = 0;
-    sigaction(SIGINT, &sa, NULL);
-    sigaction(SIGTERM, &sa, NULL);
+    srand(getpid() ^ (unsigned int)time(NULL));
 
-    // 1. Recupero chiavi e risorse IPC condivise
+    // 1. Aggancio alla Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
     if (shm_id == -1) {
         perror("[CASSIERE] shmget");
         exit(EXIT_FAILURE);
     }
-
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
     if (shm_ptr == (void *)-1) {
         perror("[CASSIERE] shmat");
         exit(EXIT_FAILURE);
     }
 
+    // 2. Connessione ai Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
     if (sem_id == -1) {
@@ -78,6 +30,12 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
+    // Registrazione PID per tracciamento
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->pid_cassiere = getpid();
+    sem_v(sem_id, SEM_MUTEX_SHM);
+
+    // 3. Connessione Coda Messaggi Cassa
     key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + STAT_CASSA);
     int msg_q_cassa = msgget(msg_key, 0600);
     if (msg_q_cassa == -1) {
@@ -86,62 +44,80 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    // 2. Barriera di sincronizzazione all'avvio
+    // 4. Barriera iniziale
     sem_p(sem_id, SEM_BARRIERA_START);
     sem_wait_zero(sem_id, SEM_BARRIERA_START);
 
-    // 3. Occupazione della postazione fisica di cassa
-    sem_p(sem_id, SEM_POSTAZIONI_CASSA);
+    // 5. Occupazione postazione fisica
+    if (sem_p(sem_id, SEM_POSTAZIONI_CASSA) == -1) {
+        shmdt(shm_ptr);
+        exit(EXIT_FAILURE);
+    }
 
-    int giorno_locale = 0;
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->operatori_in_servizio[STAT_CASSA]++;
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
-    // 4. Ciclo di servizio richieste cassa
-    while (keep_running && shm_ptr->simulazione_attiva) {
-        // Registrazione presenza all'inizio di ciascuna nuova giornata
-        if (shm_ptr->giorno_corrente != giorno_locale) {
-            giorno_locale = shm_ptr->giorno_corrente;
-            sem_p(sem_id, SEM_MUTEX_SHM);
-            shm_ptr->operatori_attivi_oggi++;
-            sem_v(sem_id, SEM_MUTEX_SHM);
+    printf("[CASSIERE PID %d] Postazione occupata. In servizio.\n", getpid());
+
+    OrderMessage req;
+    while (shm_ptr->simulazione_attiva) {
+        // Verifica disponibilità cassa (se bloccata da communication_disorder attende)
+        if (sem_p(sem_id, SEM_CASSA_BLOCCO) == -1) {
+            if (errno == EINTR || errno == EIDRM) break;
+            continue;
         }
-
-        // Verifica blocco cassa (communication_disorder) prima di servire
-        sem_p(sem_id, SEM_CASSA_BLOCCO);
         sem_v(sem_id, SEM_CASSA_BLOCCO);
 
-        OrderMessage req;
         ssize_t res = msgrcv(msg_q_cassa, &req, sizeof(OrderMessage) - sizeof(long), 1, 0);
         if (res == -1) {
-            if (errno == EINTR) {
-                continue;
-            } else if (errno == EIDRM || errno == EINVAL) {
-                break;
-            } else {
-                perror("[CASSIERE] msgrcv");
-                break;
-            }
+            if (errno == EINTR || errno == EIDRM) break;
+            continue;
         }
 
-        // Se communication_disorder scatta durante l'elaborazione del pagamento
-        sem_p(sem_id, SEM_CASSA_BLOCCO);
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        int g_curr = shm_ptr->giorno_corrente;
+        sem_v(sem_id, SEM_MUTEX_SHM);
+
+        // Controllo validità giorno
+        if (req.giorno != g_curr) {
+            req.mtype = req.sender_pid;
+            req.status = -2;
+            msgsnd(msg_q_cassa, &req, sizeof(OrderMessage) - sizeof(long), 0);
+            continue;
+        }
+
+        // Verifica blocco cassa anche prima di elaborare l'ordine
+        if (sem_p(sem_id, SEM_CASSA_BLOCCO) == -1) {
+            if (errno == EINTR || errno == EIDRM) break;
+            continue;
+        }
         sem_v(sem_id, SEM_CASSA_BLOCCO);
 
-        // Calcolo importo con eventuale sconto ticket (30/30)
+        // Calcolo importo con eventuale sconto ticket da configurazione
         double importo = req.importo;
         if (req.has_ticket) {
-            importo = importo * 0.80; // 20% di sconto per utenti muniti di ticket
+            double sconto = shm_ptr->conf.ticket_discount;
+            if (sconto <= 0.0 || sconto > 1.0) sconto = 0.20;
+            importo = importo * (1.0 - sconto);
         }
 
-        // Simulazione erogazione servizio cassa (2 sec medi simulati)
-        simula_tempo_cassa(2, 5000000L);
+        // Servizio cassa basato sui parametri di configurazione
+        simula_servizio(shm_ptr->conf.avg_srvc[STAT_CASSA], 20, shm_ptr->conf.n_nano_secs);
 
-        // Aggiornamento incasso in memoria condivisa
         sem_p(sem_id, SEM_MUTEX_SHM);
-        shm_ptr->ricavo_oggi   += importo;
+        if (req.giorno != shm_ptr->giorno_corrente) {
+            sem_v(sem_id, SEM_MUTEX_SHM);
+            req.mtype = req.sender_pid;
+            req.status = -2;
+            msgsnd(msg_q_cassa, &req, sizeof(OrderMessage) - sizeof(long), 0);
+            continue;
+        }
+        shm_ptr->ricavo_oggi += importo;
         shm_ptr->ricavo_totale += importo;
         sem_v(sem_id, SEM_MUTEX_SHM);
 
-        // Risposta mirata al PID dell'utente pagante
+        // Risposta all'utente
         OrderMessage resp;
         memset(&resp, 0, sizeof(resp));
         resp.mtype = req.sender_pid;
@@ -150,17 +126,17 @@ int main(int argc, char *argv[]) {
         resp.importo = importo;
         resp.has_ticket = req.has_ticket;
 
-        if (msgsnd(msg_q_cassa, &resp, sizeof(OrderMessage) - sizeof(long), 0) == -1) {
-            if (errno != EIDRM && errno != EINVAL) {
-                perror("[CASSIERE] msgsnd risposta scontrino");
-            }
-        }
+        msgsnd(msg_q_cassa, &resp, sizeof(OrderMessage) - sizeof(long), 0);
     }
 
-    // 5. Rilascio postazione fisica e distacco memoria condivisa
-    sem_v(sem_id, SEM_POSTAZIONI_CASSA);
-    printf("[CASSIERE PID %d] Chiusura servizio.\n", getpid());
-    shmdt(shm_ptr);
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    if (shm_ptr->operatori_in_servizio[STAT_CASSA] > 0) {
+        shm_ptr->operatori_in_servizio[STAT_CASSA]--;
+    }
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
+    sem_v(sem_id, SEM_POSTAZIONI_CASSA);
+    shmdt(shm_ptr);
+    printf("[CASSIERE PID %d] Chiusura servizio.\n", getpid());
     return 0;
 }

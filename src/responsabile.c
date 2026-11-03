@@ -198,22 +198,25 @@ int main(int argc, char *argv[]) {
 
     // 2. Ripartizione Operatori: privilegia le stazioni con AVG_SRVC_* più elevato
     int operatori_da_creare = conf.nof_workers - 1;
+    int op_per_staz[3] = {0, 0, 0};
+
     for (int i = 0; i < operatori_da_creare; i++) {
         int staz_id;
-        if (i == 0) staz_id = STAT_PRIMI;
+        if (i == 0)      staz_id = STAT_PRIMI;
         else if (i == 1) staz_id = STAT_SECONDI;
         else if (i == 2) staz_id = STAT_COFFEE;
         else {
-            int max_srvc = conf.avg_srvc[STAT_PRIMI];
             staz_id = STAT_PRIMI;
-            if (conf.avg_srvc[STAT_SECONDI] > max_srvc) {
-                max_srvc = conf.avg_srvc[STAT_SECONDI];
-                staz_id = STAT_SECONDI;
-            }
-            if (conf.avg_srvc[STAT_COFFEE] > max_srvc) {
-                staz_id = STAT_COFFEE;
+            double max_ratio = (double)conf.avg_srvc[STAT_PRIMI] / (op_per_staz[STAT_PRIMI] > 0 ? op_per_staz[STAT_PRIMI] : 1);
+            for (int s = 1; s < 3; s++) {
+                double ratio = (double)conf.avg_srvc[s] / (op_per_staz[s] > 0 ? op_per_staz[s] : 1);
+                if (ratio > max_ratio) {
+                    max_ratio = ratio;
+                    staz_id = s;
+                }
             }
         }
+        op_per_staz[staz_id]++;
 
         char staz_arg[16];
         snprintf(staz_arg, sizeof(staz_arg), "%d", staz_id);
@@ -322,7 +325,7 @@ int main(int argc, char *argv[]) {
             shm_ptr->minuto_corrente = m;
 
             // Refill limitato ai soli piatti presenti a menu
-            if (m >= prossimo_refill) {
+            if (m >= prossimo_refill && m <= 45) {
                 for (int p = 0; p < shm_ptr->menu.num_primi && p < MAX_DISHES_PER_TYPE; p++) {
                     if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
                         shm_ptr->porzioni_primi[p] += conf.avg_refill_primi;

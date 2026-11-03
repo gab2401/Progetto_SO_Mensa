@@ -41,12 +41,26 @@ int main(int argc, char *argv[]) {
     printf("[CASSIERE PID %d] Postazione occupata. In servizio.\n", getpid());
 
     OrderMessage req;
+    double incasso_locale_turno = 0.0;
+    int giorno_precedente = 1;
+
     while (shm_ptr->simulazione_attiva) {
         if (sem_p(sem_id, SEM_CASSA_BLOCCO) == -1) {
             if (errno == EINTR || errno == EIDRM) break;
             continue;
         }
         sem_v(sem_id, SEM_CASSA_BLOCCO);
+
+        // Controllo non bloccante sul cambio giorno per riversare l'incasso locale in SHM
+        sem_p(sem_id, SEM_MUTEX_SHM);
+        int g_curr = shm_ptr->giorno_corrente;
+        if (g_curr != giorno_precedente) {
+            shm_ptr->ricavo_oggi += incasso_locale_turno;
+            shm_ptr->ricavo_totale += incasso_locale_turno;
+            incasso_locale_turno = 0.0;
+            giorno_precedente = g_curr;
+        }
+        sem_v(sem_id, SEM_MUTEX_SHM);
 
         ssize_t res = msgrcv(msg_q_cassa, &req, sizeof(OrderMessage) - sizeof(long), 1, 0);
         if (res == -1) {
@@ -74,10 +88,8 @@ int main(int argc, char *argv[]) {
 
         simula_servizio(shm_ptr->conf.avg_srvc[STAT_CASSA], 20, shm_ptr->conf.n_nano_secs);
 
-        sem_p(sem_id, SEM_MUTEX_SHM);
-        shm_ptr->ricavo_oggi += importo;
-        shm_ptr->ricavo_totale += importo;
-        sem_v(sem_id, SEM_MUTEX_SHM);
+        // Aggiorna la cassa privata del processo (nessun lock di memoria condivisa!)
+        incasso_locale_turno += importo;
 
         OrderMessage resp;
         memset(&resp, 0, sizeof(resp));
@@ -90,7 +102,10 @@ int main(int argc, char *argv[]) {
         msgsnd(msg_q_cassa, &resp, sizeof(OrderMessage) - sizeof(long), 0);
     }
 
+    // Riversamento finale dell'eventuale residuo all'uscita dal servizio
     sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->ricavo_oggi += incasso_locale_turno;
+    shm_ptr->ricavo_totale += incasso_locale_turno;
     if (shm_ptr->operatori_in_servizio[STAT_CASSA] > 0) {
         shm_ptr->operatori_in_servizio[STAT_CASSA]--;
     }

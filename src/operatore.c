@@ -101,14 +101,14 @@ int main(int argc, char *argv[]) {
         int scelta = msg.dish_choice;
 
         if (station_id == STAT_PRIMI) {
-            if (scelta >= 0 && scelta < MAX_DISHES_PER_TYPE && shm_ptr->porzioni_primi[scelta] > 0) {
+            if (scelta >= 0 && scelta < shm_ptr->menu.num_primi && shm_ptr->porzioni_primi[scelta] > 0) {
                 shm_ptr->porzioni_primi[scelta]--;
                 shm_ptr->piatti_distribuiti_oggi[STAT_PRIMI]++;
                 shm_ptr->piatti_distribuiti_tot[STAT_PRIMI]++;
                 piatto_disponibile = 1;
             }
         } else if (station_id == STAT_SECONDI) {
-            if (scelta >= 0 && scelta < MAX_DISHES_PER_TYPE && shm_ptr->porzioni_secondi[scelta] > 0) {
+            if (scelta >= 0 && scelta < shm_ptr->menu.num_secondi && shm_ptr->porzioni_secondi[scelta] > 0) {
                 shm_ptr->porzioni_secondi[scelta]--;
                 shm_ptr->piatti_distribuiti_oggi[STAT_SECONDI]++;
                 shm_ptr->piatti_distribuiti_tot[STAT_SECONDI]++;

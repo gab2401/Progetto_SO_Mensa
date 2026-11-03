@@ -36,11 +36,6 @@ int init_shared_memory(const Config *conf, SharedData **shm_ptr_out) {
     ptr->minuto_corrente = 0;
     ptr->utenti_totali_attivi = conf->nof_users;
 
-    for (int i = 0; i < MAX_DISHES_PER_TYPE; i++) {
-        ptr->porzioni_primi[i] = conf->avg_refill_primi;
-        ptr->porzioni_secondi[i] = conf->avg_refill_secondi;
-    }
-
     *shm_ptr_out = ptr;
     return shm_id;
 }
@@ -69,19 +64,15 @@ int init_semaphores(const Config *conf) {
 
     union semun arg;
 
-    // Mutex SHM (binario)
     arg.val = 1;
     if (semctl(sem_id, SEM_MUTEX_SHM, SETVAL, arg) == -1) return -1;
 
-    // Barriera iniziale (attende tutti i figli generati all'avvio)
     arg.val = conf->nof_workers + conf->nof_users;
     if (semctl(sem_id, SEM_BARRIERA_START, SETVAL, arg) == -1) return -1;
 
-    // Semaforo per sincronizzare l'inizio del giorno (bloccato a 0 all'avvio)
     arg.val = 0;
     if (semctl(sem_id, SEM_INIZIO_GIORNATA, SETVAL, arg) == -1) return -1;
 
-    // Postazioni stazioni fisiche
     arg.val = conf->nof_wk_seats[STAT_PRIMI];
     if (semctl(sem_id, SEM_POSTAZIONI_PRIMI, SETVAL, arg) == -1) return -1;
 
@@ -94,17 +85,20 @@ int init_semaphores(const Config *conf) {
     arg.val = conf->nof_wk_seats[STAT_CASSA];
     if (semctl(sem_id, SEM_POSTAZIONI_CASSA, SETVAL, arg) == -1) return -1;
 
-    // Posti a tavola
     arg.val = conf->nof_table_seats;
     if (semctl(sem_id, SEM_TAVOLI, SETVAL, arg) == -1) return -1;
 
-    // Semaforo per interruzione cassa (1 = cassa attiva)
     arg.val = 1;
     if (semctl(sem_id, SEM_CASSA_BLOCCO, SETVAL, arg) == -1) return -1;
 
-    // Lettore ticket (1 postazione di validazione)
     arg.val = 1;
     if (semctl(sem_id, SEM_LETTORE_TICKET, SETVAL, arg) == -1) return -1;
+
+    // Inizializza i semafori dedicati alla barriera dei singoli gruppi a 0
+    arg.val = 0;
+    for (int g = 0; g < MAX_GROUPS; g++) {
+        if (semctl(sem_id, SEM_GRUPPI_BASE + g, SETVAL, arg) == -1) return -1;
+    }
 
     return sem_id;
 }

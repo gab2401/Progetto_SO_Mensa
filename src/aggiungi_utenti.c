@@ -68,10 +68,13 @@ int main(int argc, char *argv[]) {
             shm_ptr->gruppi[g_id].total_members = 1;
             shm_ptr->gruppi[g_id].active_today = 1;
             shm_ptr->gruppi[g_id].ready_count = 0;
-            shm_ptr->gruppi[g_id].barrier_flag = 0;
+
+            // Inizializza il semaforo di barriera del nuovo gruppo a 0
+            union semun uarg;
+            uarg.val = 0;
+            semctl(sem_id, SEM_GRUPPI_BASE + g_id, SETVAL, uarg);
         }
 
-        // Incremento della popolazione utenti attiva
         shm_ptr->utenti_totali_attivi++;
         sem_v(sem_id, SEM_MUTEX_SHM);
 
@@ -85,7 +88,7 @@ int main(int argc, char *argv[]) {
             char g_buf[16];
             snprintf(g_buf, sizeof(g_buf), "%d", g_id);
 
-            // argv[1] = group_id, argv[2] = is_dynamic (1 = non attende SEM_BARRIERA_START)
+            // argv[1] = group_id, argv[2] = is_dynamic (1 = salta la barriera iniziale)
             char *args[] = {"utente", g_buf, "1", NULL};
 
             execve("./bin/utente", args, NULL);
@@ -93,7 +96,7 @@ int main(int argc, char *argv[]) {
             _exit(EXIT_FAILURE);
         }
 
-        // Memorizzazione del PID in SHM per il cleanup del master
+        // Tracciamento del PID in SHM per il cleanup del master
         sem_p(sem_id, SEM_MUTEX_SHM);
         shm_ptr->utenti_dinamici_pids[shm_ptr->num_utenti_dinamici++] = pid;
         sem_v(sem_id, SEM_MUTEX_SHM);

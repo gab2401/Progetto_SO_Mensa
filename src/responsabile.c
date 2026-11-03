@@ -76,7 +76,6 @@ pid_t avvia_processo(const char *bin_path, char *const args[]) {
 
 static void respingi_coda_fine_giornata(int g_concluso) {
     OrderMessage msg;
-    // Respinge chi e' ancora in coda alle stazioni cibo (non ha finito di prendere il vassoio)
     for (int s = 0; s < STAT_CASSA; s++) {
         while (msgrcv(msg_queue_id[s], &msg, sizeof(OrderMessage) - sizeof(long), 1, IPC_NOWAIT) != -1) {
             if (msg.giorno <= g_concluso) {
@@ -86,7 +85,6 @@ static void respingi_coda_fine_giornata(int g_concluso) {
             }
         }
     }
-    // Sblocca eventuali utenti fermi alla barriera di gruppo per fine giornata
     if (shm_ptr != NULL) {
         for (int gr = 0; gr < shm_ptr->num_gruppi; gr++) {
             sem_add(sem_id, SEM_GRUPPI_BASE + gr, shm_ptr->gruppi[gr].total_members);
@@ -151,8 +149,6 @@ int main(int argc, char *argv[]) {
     printf("Configurazione caricata con successo:\n");
     printf("- Durata simulazione: %d giorni\n", conf.sim_duration);
     printf("- Lavoratori: %d, Utenti iniziali: %d\n", conf.nof_workers, conf.nof_users);
-    printf("- Prezzo primi: %.2f EUR, secondi: %.2f EUR, caffe': %.2f EUR\n",
-           conf.price_primi, conf.price_secondi, conf.price_coffee);
 
     struct sigaction sa;
     memset(&sa, 0, sizeof(sa));
@@ -171,15 +167,6 @@ int main(int argc, char *argv[]) {
 
     if (carica_menu("config/menu.txt", &shm_ptr->menu) == -1) {
         fprintf(stderr, "[RESPONSABILE] Attenzione: impossibile leggere config/menu.txt\n");
-    } else {
-        printf("[RESPONSABILE] Menu caricato: %d primi, %d secondi, %d dolci, %d caffe'.\n",
-               shm_ptr->menu.num_primi, shm_ptr->menu.num_secondi,
-               shm_ptr->menu.num_dolci, shm_ptr->menu.num_caffe);
-    }
-
-    for (int s = 0; s < NUM_STATIONS; s++) {
-        shm_ptr->tempo_attesa_totale[s] = 0;
-        shm_ptr->ordini_completati[s] = 0;
     }
 
     int totale_figli = conf.nof_workers + conf.nof_users;
@@ -196,7 +183,7 @@ int main(int argc, char *argv[]) {
     if (pid_cassa == -1) { cleanup_resources(); exit(EXIT_FAILURE); }
     child_pids[num_children_spawned++] = pid_cassa;
 
-    // 2. Ripartizione Operatori: privilegia le stazioni con AVG_SRVC_* più elevato
+    // 2. Ripartizione Operatori privilegiando AVG_SRVC più alto
     int operatori_da_creare = conf.nof_workers - 1;
     int op_per_staz[3] = {0, 0, 0};
 
@@ -255,9 +242,11 @@ int main(int argc, char *argv[]) {
         cur_group_id++;
     }
     shm_ptr->num_gruppi = cur_group_id;
-    printf("[RESPONSABILE] Creati %d utenti suddivisi in %d gruppi.\n", conf.nof_users, cur_group_id);
-    printf("[RESPONSABILE] Creati %d processi figli totali. Attesa sincronizzazione alla barriera...\n",
-           num_children_spawned);
+
+    sem_p(sem_id, SEM_MUTEX_SHM);
+    shm_ptr->operatori_attivi_oggi = 0;
+    shm_ptr->operatori_attivi_totali = 0;
+    sem_v(sem_id, SEM_MUTEX_SHM);
 
     sem_wait_zero(sem_id, SEM_BARRIERA_START);
     printf("[RESPONSABILE] Tutti i processi pronti. AVVIO SIMULAZIONE!\n");
@@ -280,9 +269,14 @@ int main(int argc, char *argv[]) {
         shm_ptr->utenti_finito_giornata = 0;
         shm_ptr->ricavo_oggi = 0.0;
         shm_ptr->pause_effettuate_oggi = 0;
-        shm_ptr->operatori_attivi_oggi = conf.nof_workers;
+        if (g > 1) {
+            int op_al_banco = 0;
+            for (int s = 0; s < NUM_STATIONS; s++) {
+                op_al_banco += shm_ptr->operatori_in_servizio[s];
+            }
+            shm_ptr->operatori_attivi_oggi = 0;
+        }
 
-        // Reset scorte a inizio giornata da bando
         for (int p = 0; p < shm_ptr->menu.num_primi && p < MAX_DISHES_PER_TYPE; p++) {
             shm_ptr->porzioni_primi[p] = conf.avg_refill_primi;
         }
@@ -290,7 +284,7 @@ int main(int argc, char *argv[]) {
             shm_ptr->porzioni_secondi[p] = conf.avg_refill_secondi;
         }
 
-        // Reset dei semafori di gruppo per la nuova giornata
+        // Reset sicuro barriere di gruppo
         for (int gr = 0; gr < shm_ptr->num_gruppi; gr++) {
             shm_ptr->gruppi[gr].active_today = shm_ptr->gruppi[gr].total_members;
             shm_ptr->gruppi[gr].ready_count = 0;
@@ -324,7 +318,6 @@ int main(int argc, char *argv[]) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->minuto_corrente = m;
 
-            // Refill limitato ai soli piatti presenti a menu
             if (m >= prossimo_refill && m <= 45) {
                 for (int p = 0; p < shm_ptr->menu.num_primi && p < MAX_DISHES_PER_TYPE; p++) {
                     if (shm_ptr->porzioni_primi[p] + conf.avg_refill_primi <= conf.max_porzioni_primi)
@@ -354,7 +347,7 @@ int main(int argc, char *argv[]) {
 
         respingi_coda_fine_giornata(g);
 
-        // Attesa convergenza utenti
+        // Attesa convergenza utenti a fine giornata
         for (int tentativi = 0; tentativi < 200; tentativi++) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             int completati = shm_ptr->utenti_finito_giornata;
@@ -367,7 +360,6 @@ int main(int argc, char *argv[]) {
             attendi_nanosecondi(conf.n_nano_secs / 2);
         }
 
-        // Calcolo piatti avanzati a fine giornata sui piatti effettivi
         sem_p(sem_id, SEM_MUTEX_SHM);
         int avanzati_primi = 0;
         for (int p = 0; p < shm_ptr->menu.num_primi && p < MAX_DISHES_PER_TYPE; p++) {
@@ -416,7 +408,6 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // Verifica Overload a fine turno
         if (conf.overload_threshold > 0 && utenti_in_coda_fine_giorno > conf.overload_threshold) {
             causa_terminazione = "OVERLOAD (Utenti in coda a fine giornata > soglia)";
             shm_ptr->motivo_terminazione = 1;
@@ -432,7 +423,6 @@ int main(int argc, char *argv[]) {
     sem_p(sem_id, SEM_MUTEX_SHM);
     shm_ptr->simulazione_attiva = 0;
 
-    // Assegnazione causa finale inequivocabile
     if (stop_richiesto) {
         causa_terminazione = "INTERRUZIONE (Segnale SIGINT/SIGTERM ricevuto)";
     } else if (shm_ptr->motivo_terminazione == 1) {
@@ -452,41 +442,11 @@ int main(int argc, char *argv[]) {
            shm_ptr->utenti_serviti_tot, (double)shm_ptr->utenti_serviti_tot / giorni_effettivi_svolti);
     printf("Totale utenti non serviti:  %d (Media: %.2f al giorno)\n",
            shm_ptr->utenti_non_serviti_tot, (double)shm_ptr->utenti_non_serviti_tot / giorni_effettivi_svolti);
-    printf("  - di cui per esaurimento scorte: %d (Media: %.2f al giorno)\n",
-           shm_ptr->utenti_non_serviti_rinuncia_tot, (double)shm_ptr->utenti_non_serviti_rinuncia_tot / giorni_effettivi_svolti);
-    printf("  - di cui per scadenza tempo turno: %d (Media: %.2f al giorno)\n",
-           shm_ptr->utenti_non_serviti_tempo_tot, (double)shm_ptr->utenti_non_serviti_tempo_tot / giorni_effettivi_svolti);
+    printf("Operatori attivi totali:    %d\n", conf.nof_workers);
     printf("Incasso totale complessivo: %.2f EUR (Media: %.2f EUR al giorno)\n",
            shm_ptr->ricavo_totale, shm_ptr->ricavo_totale / giorni_effettivi_svolti);
     printf("Totale pause effettuate:    %d (Media: %.2f al giorno)\n",
            shm_ptr->pause_totali, (double)shm_ptr->pause_totali / giorni_effettivi_svolti);
-
-    int tot_piatti = shm_ptr->piatti_distribuiti_tot[STAT_PRIMI] +
-                     shm_ptr->piatti_distribuiti_tot[STAT_SECONDI] +
-                     shm_ptr->piatti_distribuiti_tot[STAT_COFFEE];
-    printf("Piatti totali distribuiti:  Primi: %d | Secondi: %d | Coffee: %d (Tot: %d, Media: %.2f)\n",
-           shm_ptr->piatti_distribuiti_tot[STAT_PRIMI],
-           shm_ptr->piatti_distribuiti_tot[STAT_SECONDI],
-           shm_ptr->piatti_distribuiti_tot[STAT_COFFEE],
-           tot_piatti, (double)tot_piatti / giorni_effettivi_svolti);
-    
-    int tot_avanzati = shm_ptr->piatti_avanzati_primi_tot + shm_ptr->piatti_avanzati_secondi_tot;
-    printf("Piatti avanzati totali:     Primi: %d (media %.2f) | Secondi: %d (media %.2f) | Tot: %d (media %.2f)\n",
-           shm_ptr->piatti_avanzati_primi_tot, (double)shm_ptr->piatti_avanzati_primi_tot / giorni_effettivi_svolti,
-           shm_ptr->piatti_avanzati_secondi_tot, (double)shm_ptr->piatti_avanzati_secondi_tot / giorni_effettivi_svolti,
-           tot_avanzati, (double)tot_avanzati / giorni_effettivi_svolti);
-
-    printf("\nTempi medi di attesa complessivi:\n");
-    for (int s = 0; s < NUM_STATIONS; s++) {
-        if (shm_ptr->ordini_completati[s] > 0) {
-            double media_ms = (double)shm_ptr->tempo_attesa_totale[s] /
-                              (shm_ptr->ordini_completati[s] * 1000000.0);
-            printf("  - %-10s: %.2f ms (%d ordini)\n", staz_nomi[s], media_ms, shm_ptr->ordini_completati[s]);
-        } else {
-            printf("  - %-10s: N/D (0 ordini)\n", staz_nomi[s]);
-        }
-    }
-    printf("=======================================================\n");
 
     esporta_statistiche_csv("statistiche.csv", shm_ptr, giorni_effettivi_svolti, causa_terminazione);
     sem_v(sem_id, SEM_MUTEX_SHM);

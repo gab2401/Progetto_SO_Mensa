@@ -17,57 +17,40 @@ int main(int argc, char *argv[]) {
 
     srand(getpid() ^ (unsigned int)time(NULL));
 
-    // 1. Aggancio Memoria Condivisa
     key_t shm_key = ftok(FTOK_PATH, FTOK_PROJ_SHM);
     int shm_id = shmget(shm_key, sizeof(SharedData), 0600);
-    if (shm_id == -1) { 
-        perror("[OPERATORE] shmget"); 
-        exit(EXIT_FAILURE); 
-    }
-
+    if (shm_id == -1) { perror("[OPERATORE] shmget"); exit(EXIT_FAILURE); }
     SharedData *shm_ptr = (SharedData *)shmat(shm_id, NULL, 0);
-    if (shm_ptr == (void *)-1) { 
-        perror("[OPERATORE] shmat"); 
-        exit(EXIT_FAILURE); 
-    }
+    if (shm_ptr == (void *)-1) { perror("[OPERATORE] shmat"); exit(EXIT_FAILURE); }
 
-    // 2. Recupero Semafori
     key_t sem_key = ftok(FTOK_PATH, FTOK_PROJ_SEM);
     int sem_id = semget(sem_key, NUM_SEMAPHORES, 0600);
-    if (sem_id == -1) { 
-        perror("[OPERATORE] semget"); 
-        shmdt(shm_ptr);
-        exit(EXIT_FAILURE); 
-    }
+    if (sem_id == -1) { perror("[OPERATORE] semget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
 
-    // 3. Recupero Coda Messaggi
     key_t msg_key = ftok(FTOK_PATH, FTOK_PROJ_MSG_BASE + station_id);
     int msg_q_id = msgget(msg_key, 0600);
-    if (msg_q_id == -1) { 
-        perror("[OPERATORE] msgget"); 
-        shmdt(shm_ptr);
-        exit(EXIT_FAILURE); 
-    }
+    if (msg_q_id == -1) { perror("[OPERATORE] msgget"); shmdt(shm_ptr); exit(EXIT_FAILURE); }
 
     int sem_postazione = SEM_POSTAZIONI_PRIMI + station_id;
 
-    // 4. Barriera avvio sincrono
+    // Barriera sincronizzazione avvio
     sem_p(sem_id, SEM_BARRIERA_START);
     sem_wait_zero(sem_id, SEM_BARRIERA_START);
 
-    // 5. Occupazione postazione fisica
+    // Competizione per la postazione fisica
     if (sem_p(sem_id, sem_postazione) == -1) {
         shmdt(shm_ptr);
         exit(EXIT_FAILURE);
     }
 
+    int gia_attivo_oggi = 1;
     sem_p(sem_id, SEM_MUTEX_SHM);
     shm_ptr->operatori_in_servizio[station_id]++;
+    shm_ptr->operatori_attivi_oggi++;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
     printf("[OPERATORE %d] In servizio alla stazione %d\n", getpid(), station_id);
 
-    // 6. Ciclo di servizio richieste
     OrderMessage msg;
     int pause_fatte_oggi = 0;
     int giorno_locale = 1;
@@ -86,9 +69,13 @@ int main(int argc, char *argv[]) {
             giorno_locale = g_curr;
             pause_fatte_oggi = 0;
             clienti_serviti_da_ultima_pausa = 0;
+            gia_attivo_oggi = 0;
+            // L'operatore si trova già al banco all'alba del nuovo giorno
+            shm_ptr->operatori_attivi_oggi++;
+            gia_attivo_oggi = 1;
         }
 
-        // Se l'ordine appartiene a una giornata terminata, respinge l'utente
+        // Rigetto ordini emessi in giornate concluse
         if (msg.giorno != g_curr) {
             sem_v(sem_id, SEM_MUTEX_SHM);
             msg.status = -2;
@@ -134,7 +121,7 @@ int main(int argc, char *argv[]) {
 
         clienti_serviti_da_ultima_pausa++;
 
-        // Valutazione pausa con vincolo di presidio minimo
+        // Verifica pausa nel rispetto del vincolo di presidio minimo
         if (clienti_serviti_da_ultima_pausa >= 2 && pause_fatte_oggi < shm_ptr->conf.nof_pause) {
             if ((rand() % 10) < 3) {
                 int puo_andare_in_pausa = 0;
@@ -162,6 +149,10 @@ int main(int argc, char *argv[]) {
 
                         sem_p(sem_id, SEM_MUTEX_SHM);
                         shm_ptr->operatori_in_servizio[station_id]++;
+                        if (!gia_attivo_oggi) {
+                            shm_ptr->operatori_attivi_oggi++;
+                            gia_attivo_oggi = 1;
+                        }
                         sem_v(sem_id, SEM_MUTEX_SHM);
                         printf("[OPERATORE %d] Rientrato dalla pausa alla stazione %d\n",
                                getpid(), station_id);

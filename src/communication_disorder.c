@@ -31,7 +31,8 @@ int main(int argc, char *argv[]) {
         exit(EXIT_FAILURE);
     }
 
-    sleep(durata);
+    long durata_ns = (long)durata * conf.n_nano_secs;
+    attendi_nanosecondi(durata_ns);
 
     if (sem_v_undo(sem_id, SEM_CASSA_BLOCCO) == -1) {
         perror("[DISORDER] sem_v su SEM_CASSA_BLOCCO fallita");

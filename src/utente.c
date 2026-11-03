@@ -37,7 +37,6 @@ static int ordina_a_stazione(int msg_qid, int piatto_scelto, int categoria,
     clock_gettime(CLOCK_MONOTONIC, &t_end);
     long elapsed_ns = (t_end.tv_sec - t_start.tv_sec) * 1000000000L + (t_end.tv_nsec - t_start.tv_nsec);
 
-    // Registra i tempi solo se il servizio è stato effettivamente erogato
     if (msg.status == 0) {
         sem_p(sem_id, SEM_MUTEX_SHM);
         shm_ptr->tempo_attesa_oggi[staz] += elapsed_ns;
@@ -72,6 +71,7 @@ static void registra_esito_utente(SharedData *shm_ptr, int sem_id, int servito, 
 
 static void notifica_rinuncia_gruppo(SharedData *shm_ptr, int sem_id, int group_id) {
     if (group_id < 0 || group_id >= MAX_GROUPS) return;
+    
     sem_p(sem_id, SEM_MUTEX_SHM);
     if (shm_ptr->gruppi[group_id].active_today > 0) {
         shm_ptr->gruppi[group_id].active_today--;
@@ -80,7 +80,7 @@ static void notifica_rinuncia_gruppo(SharedData *shm_ptr, int sem_id, int group_
     int attivi = shm_ptr->gruppi[group_id].active_today;
     sem_v(sem_id, SEM_MUTEX_SHM);
 
-    if (pronti >= attivi && pronti > 0) {
+    if (pronti >= attivi && attivi > 0 && pronti > 0) {
         sem_add(sem_id, SEM_GRUPPI_BASE + group_id, pronti);
     }
 }
@@ -124,11 +124,16 @@ int main(int argc, char *argv[]) {
     }
 
     int has_ticket = ((rand() % 100) < 80) ? 1 : 0;
+    int primo_giro_dinamico = is_dynamic;
 
     while (shm_ptr->simulazione_attiva) {
-        if (sem_p(sem_id, SEM_INIZIO_GIORNATA) == -1) {
-            if (errno == EINTR || errno == EIDRM) break;
-            continue;
+        if (primo_giro_dinamico) {
+            primo_giro_dinamico = 0;
+        } else {
+            if (sem_p(sem_id, SEM_INIZIO_GIORNATA) == -1) {
+                if (errno == EINTR || errno == EIDRM) break;
+                continue;
+            }
         }
 
         if (!shm_ptr->simulazione_attiva) break;
@@ -137,6 +142,7 @@ int main(int argc, char *argv[]) {
         int giorno_attuale = shm_ptr->giorno_corrente;
         sem_v(sem_id, SEM_MUTEX_SHM);
 
+        // 1. Corsia preliminare lettura ticket
         if (has_ticket) {
             if (sem_p(sem_id, SEM_LETTORE_TICKET) != -1) {
                 attendi_nanosecondi(shm_ptr->conf.n_nano_secs / 2);
@@ -149,6 +155,7 @@ int main(int argc, char *argv[]) {
         int ha_coffee = 0;
         int num_portate = 0;
 
+        // 2. Ordinazione Primo Piatto
         int n_primi = shm_ptr->menu.num_primi > 0 ? shm_ptr->menu.num_primi : 1;
         int scelta_p = rand() % n_primi;
         int esito_p = -1;
@@ -166,6 +173,7 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
+        // 3. Ordinazione Secondo Piatto
         int n_secondi = shm_ptr->menu.num_secondi > 0 ? shm_ptr->menu.num_secondi : 1;
         int scelta_s = rand() % n_secondi;
         int esito_s = -1;
@@ -183,9 +191,9 @@ int main(int argc, char *argv[]) {
             continue;
         }
 
-        // Se entrambi risultano momentaneamente esauriti, attende il refill ed effettua un secondo tentativo
+        // Fallback: se entrambi sono esauriti, attende refill prima di rinunciare definitivamente
         if (!ha_primo && !ha_secondo) {
-            attendi_nanosecondi(5 * shm_ptr->conf.n_nano_secs); // Attesa di 5 minuti simulati
+            attendi_nanosecondi(5 * shm_ptr->conf.n_nano_secs);
             
             for (int t = 0; t < n_primi; t++) {
                 int piatto = (scelta_p + t) % n_primi;
@@ -205,7 +213,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // 3. Stazione Caffè e Dolce (solo se il giorno non è già scaduto)
+        // 4. Stazione Caffè e Dolce
         sem_p(sem_id, SEM_MUTEX_SHM);
         int in_tempo_caffe = (shm_ptr->giorno_corrente == giorno_attuale);
         sem_v(sem_id, SEM_MUTEX_SHM);
@@ -219,7 +227,7 @@ int main(int argc, char *argv[]) {
             }
         }
 
-        // 4. Barriera dei Gruppi passiva su semaforo
+        // 5. Barriera dei Gruppi su semaforo
         if (group_id >= 0 && group_id < MAX_GROUPS) {
             sem_p(sem_id, SEM_MUTEX_SHM);
             shm_ptr->gruppi[group_id].ready_count++;
@@ -228,13 +236,20 @@ int main(int argc, char *argv[]) {
             sem_v(sem_id, SEM_MUTEX_SHM);
 
             if (pronti < attivi) {
-                sem_p(sem_id, SEM_GRUPPI_BASE + group_id);
-            } else if (attivi > 1) {
-                sem_add(sem_id, SEM_GRUPPI_BASE + group_id, attivi - 1);
+                if (sem_p(sem_id, SEM_GRUPPI_BASE + group_id) == -1) {
+                    if (errno == EINTR || errno == EIDRM) {
+                        registra_esito_utente(shm_ptr, sem_id, 0, 0);
+                        continue;
+                    }
+                }
+            } else {
+                if (attivi > 1) {
+                    sem_add(sem_id, SEM_GRUPPI_BASE + group_id, attivi - 1);
+                }
             }
         }
 
-        // 5. Pagamento alla Cassa (chi ha i piatti nel vassoio paga sempre prima di uscire)
+        // 6. Pagamento alla Cassa
         OrderMessage cassa_msg;
         memset(&cassa_msg, 0, sizeof(cassa_msg));
         cassa_msg.mtype = 1;
@@ -265,13 +280,12 @@ int main(int argc, char *argv[]) {
         shm_ptr->ordini_completati[STAT_CASSA]++;
         sem_v(sem_id, SEM_MUTEX_SHM);
 
-        // 6. Tavolo e Refezione
+        // 7. Tavolo e Refezione
         if (sem_p(sem_id, SEM_TAVOLI) != -1) {
             simula_consumo_pasto(num_portate, shm_ptr->conf.n_nano_secs);
             sem_v(sem_id, SEM_TAVOLI);
         }
 
-        // L'utente ha ritirato i piatti, pagato in cassa e consumato al tavolo -> SERVITO!
         registra_esito_utente(shm_ptr, sem_id, 1, 0);
     }
 
